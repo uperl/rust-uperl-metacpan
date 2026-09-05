@@ -13,8 +13,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use metacpan_api_modern::types::DownloadUrl;
 use metacpan_api_modern::{Client, PodFormat};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 
 /// Command line interface to the MetaCPAN API.
 #[derive(Parser)]
@@ -182,6 +184,23 @@ enum Command {
         dev: bool,
     },
 
+    /// Download the release providing a module and verify its checksum.
+    ///
+    /// Resolves the same URL as `download-url`, fetches the tarball into the
+    /// current directory, and checks its SHA-256 against the digest reported by
+    /// the API. Exits non-zero if any request fails or the checksum mismatches;
+    /// on a mismatch nothing is written.
+    Download {
+        /// Module name, e.g. FFI::Platypus.
+        module: String,
+        /// Version constraint, e.g. "== 2.08" or "<= 2.10".
+        #[arg(long)]
+        version: Option<String>,
+        /// Allow developer (trial) releases.
+        #[arg(long)]
+        dev: bool,
+    },
+
     /// List known CPAN mirrors.
     Mirrors,
 
@@ -299,6 +318,86 @@ async fn main() -> Result<()> {
             }
             let v = get_query(&client, &format!("download_url/{module}"), &query).await?;
             emit(v, g.json, color, |v| render::download_url(v, color))?;
+        }
+
+        Command::Download {
+            module,
+            version,
+            dev,
+        } => {
+            let mut query: Vec<(&str, String)> = Vec::new();
+            if let Some(version) = version {
+                query.push(("version", version.clone()));
+            }
+            if *dev {
+                query.push(("dev", "1".to_string()));
+            }
+            let v = get_query(&client, &format!("download_url/{module}"), &query).await?;
+            let d: DownloadUrl =
+                serde_json::from_value(v).context("decoding download_url response")?;
+
+            let url = d
+                .download_url
+                .as_deref()
+                .context("API response contained no download_url")?;
+            let expected = d.checksum_sha256.as_deref().context(
+                "API response contained no checksum_sha256; refusing to download unverified",
+            )?;
+            let file_name = url
+                .split('?')
+                .next()
+                .unwrap_or(url)
+                .rsplit('/')
+                .find(|s| !s.is_empty())
+                .context("could not derive a file name from the download URL")?;
+
+            let response = client
+                .http()
+                .get(url)
+                .send()
+                .await
+                .with_context(|| format!("downloading {url}"))?;
+            let status = response.status();
+            if !status.is_success() {
+                anyhow::bail!("downloading {url}: HTTP {}", status.as_u16());
+            }
+            let bytes = response
+                .bytes()
+                .await
+                .with_context(|| format!("reading body of {url}"))?;
+
+            let mut hasher = Sha256::new();
+            hasher.update(&bytes);
+            let actual = hex::encode(hasher.finalize());
+            if !actual.eq_ignore_ascii_case(expected) {
+                anyhow::bail!(
+                    "checksum mismatch for {file_name}: expected {expected}, got {actual}"
+                );
+            }
+
+            std::fs::write(file_name, &bytes).with_context(|| format!("writing {file_name}"))?;
+
+            if g.json {
+                print!(
+                    "{}",
+                    json::to_string(
+                        &json!({
+                            "file": file_name,
+                            "bytes": bytes.len(),
+                            "checksum_sha256": actual,
+                            "release": d.release,
+                            "version": d.version,
+                            "download_url": url,
+                        }),
+                        color
+                    )
+                );
+            } else {
+                println!(
+                    "{file_name}  {}  sha256 ok",
+                    human_bytes(bytes.len() as u64)
+                );
+            }
         }
 
         Command::Mirrors => {

@@ -31,6 +31,7 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--color <auto|always|never>]
 | `distribution <DIST>` | distribution aggregates (CPAN River, bug counts, ...) |
 | `changes <NAME> [--author <PAUSEID>]` | a distribution's change log |
 | `download-url <MODULE> [--version <RANGE>] [--dev]` | the archive that satisfies a module request |
+| `download <MODULE> [--version <RANGE>] [--dev]` | download that archive into the current directory and verify its SHA-256 |
 | `mirrors` | known CPAN mirrors |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
 | `cache path` | print the cache directory |
@@ -70,6 +71,7 @@ uperl-metacpan release FFI-Platypus-2.10 --author PLICEASE
 uperl-metacpan module FFI::Platypus --json
 uperl-metacpan search --type release --query "author:PLICEASE AND status:latest" --size 20
 uperl-metacpan download-url FFI::Platypus --version "== 2.08"
+uperl-metacpan download FFI::Platypus --version "== 2.08"
 uperl-metacpan --json mirrors | jq '.[].name'
 uperl-metacpan cache clear
 ```
