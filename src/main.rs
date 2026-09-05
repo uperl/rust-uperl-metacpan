@@ -42,9 +42,17 @@ struct GlobalOpts {
     )]
     color: ColorWhen,
 
-    /// Cache successful GET responses under this directory.
+    /// Directory for the on-disk response cache.
+    ///
+    /// Defaults to a platform cache location (e.g. ~/.cache/uperl/metacpan on
+    /// Linux, ~/Library/Caches/uperl/metacpan on macOS,
+    /// %LOCALAPPDATA%\uperl\metacpan on Windows).
     #[arg(long, global = true, value_name = "DIR")]
     cache_dir: Option<PathBuf>,
+
+    /// Do not read from or write to the response cache.
+    #[arg(long, global = true)]
+    no_cache: bool,
 
     /// Override the API base URL.
     #[arg(long, global = true, value_name = "URL")]
@@ -78,6 +86,14 @@ impl From<PodFmt> for PodFormat {
             PodFmt::Pod => PodFormat::Pod,
         }
     }
+}
+
+#[derive(Subcommand)]
+enum CacheAction {
+    /// Delete every cached response.
+    Clear,
+    /// Print the cache directory path.
+    Path,
 }
 
 #[derive(Subcommand)]
@@ -165,6 +181,12 @@ enum Command {
 
     /// List known CPAN mirrors.
     Mirrors,
+
+    /// Inspect or clear the on-disk response cache.
+    Cache {
+        #[command(subcommand)]
+        action: CacheAction,
+    },
 
     /// Search a document type with a Lucene query string.
     Search {
@@ -282,6 +304,22 @@ async fn main() -> Result<()> {
             emit(v, g.json, color, |v| render::mirrors(v, color))?;
         }
 
+        Command::Cache { action } => {
+            let dir = resolve_cache_dir(g)
+                .context("could not determine a cache directory; pass --cache-dir")?;
+            match action {
+                CacheAction::Path => println!("{}", dir.display()),
+                CacheAction::Clear => {
+                    Client::builder()
+                        .cache_dir(dir.clone())
+                        .build()?
+                        .clear_cache()
+                        .with_context(|| format!("clearing cache at {}", dir.display()))?;
+                    println!("cleared cache at {}", dir.display());
+                }
+            }
+        }
+
         Command::Search {
             r#type,
             query,
@@ -316,10 +354,22 @@ fn build_client(g: &GlobalOpts) -> Result<Client> {
     if let Some(base) = &g.base_url {
         builder = builder.base_url(base.clone());
     }
-    if let Some(dir) = &g.cache_dir {
-        builder = builder.cache_dir(dir.clone());
+    if !g.no_cache
+        && let Some(dir) = resolve_cache_dir(g)
+    {
+        builder = builder.cache_dir(dir);
     }
     builder.build().context("building HTTP client")
+}
+
+/// The cache directory to use: an explicit `--cache-dir`, otherwise a
+/// per-platform default under the user's cache home
+/// (`~/.cache/uperl/metacpan` and equivalents). `None` only if the platform
+/// cache home cannot be determined and nothing was passed.
+fn resolve_cache_dir(g: &GlobalOpts) -> Option<PathBuf> {
+    g.cache_dir
+        .clone()
+        .or_else(|| dirs::cache_dir().map(|base| base.join("uperl").join("metacpan")))
 }
 
 /// GET a path and parse the body as JSON.

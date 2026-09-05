@@ -33,6 +33,8 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--color <auto|always|never>]
 | `download-url <MODULE> [--version <RANGE>] [--dev]` | the archive that satisfies a module request |
 | `mirrors` | known CPAN mirrors |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
+| `cache path` | print the cache directory |
+| `cache clear` | delete every cached response |
 
 ### Global options
 
@@ -40,8 +42,23 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--color <auto|always|never>]
 - `--color <auto\|always\|never>` — when to colour JSON output. `auto` (the
   default) colours only when stdout is a terminal, so piping or redirecting
   produces plain JSON.
-- `--cache-dir <DIR>` — cache successful GET responses on disk (1 hour TTL).
+- `--no-cache` — bypass the response cache for this run.
+- `--cache-dir <DIR>` — override the cache directory.
 - `--base-url <URL>` — talk to a private MetaCPAN deployment.
+
+### Caching
+
+Successful GET responses are cached on disk for one hour. The default location
+is the platform cache directory:
+
+| Platform | Default cache directory |
+| --- | --- |
+| Linux | `~/.cache/uperl/metacpan` (respects `$XDG_CACHE_HOME`) |
+| macOS | `~/Library/Caches/uperl/metacpan` |
+| Windows | `%LOCALAPPDATA%\uperl\metacpan` |
+
+Clear it with `uperl-metacpan cache clear`, or run any command with `--no-cache`
+to skip it.
 
 ### Examples
 
@@ -53,6 +70,7 @@ uperl-metacpan module FFI::Platypus --json
 uperl-metacpan search --type release --query "author:PLICEASE AND status:latest" --size 20
 uperl-metacpan download-url FFI::Platypus --version "== 2.08"
 uperl-metacpan --json mirrors | jq '.[].name'
+uperl-metacpan cache clear
 ```
 
 ## License
