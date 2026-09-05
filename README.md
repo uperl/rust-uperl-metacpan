@@ -34,6 +34,7 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--color <auto|always|never>]
 | `mirrors` | known CPAN mirrors |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
 | `cache path` | print the cache directory |
+| `cache status` | show the cache location, entry count, and disk space used (actual blocks allocated, like `du`) |
 | `cache clear` | delete every cached response |
 
 ### Global options
@@ -57,8 +58,8 @@ is the platform cache directory:
 | macOS | `~/Library/Caches/uperl/metacpan` |
 | Windows | `%LOCALAPPDATA%\uperl\metacpan` |
 
-Clear it with `uperl-metacpan cache clear`, or run any command with `--no-cache`
-to skip it.
+Check how much space it uses with `uperl-metacpan cache status`, clear it with
+`uperl-metacpan cache clear`, or run any command with `--no-cache` to skip it.
 
 ### Examples
 

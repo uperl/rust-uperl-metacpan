@@ -4,6 +4,7 @@
 //! table by default; `--json` switches to pretty-printed JSON, coloured when
 //! stdout is a terminal (override with `--color`).
 
+mod diskusage;
 mod json;
 mod render;
 
@@ -94,6 +95,8 @@ enum CacheAction {
     Clear,
     /// Print the cache directory path.
     Path,
+    /// Show the cache location, entry count, and disk space it uses.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -317,6 +320,18 @@ async fn main() -> Result<()> {
                         .with_context(|| format!("clearing cache at {}", dir.display()))?;
                     println!("cleared cache at {}", dir.display());
                 }
+                CacheAction::Status => {
+                    println!("location:   {}", dir.display());
+                    if dir.exists() {
+                        let (files, bytes) = diskusage::measure(&dir)
+                            .with_context(|| format!("measuring {}", dir.display()))?;
+                        println!("entries:    {files}");
+                        println!("disk usage: {} ({bytes} bytes)", human_bytes(bytes));
+                    } else {
+                        println!("entries:    0");
+                        println!("disk usage: 0 B (not created yet)");
+                    }
+                }
             }
         }
 
@@ -422,6 +437,22 @@ fn emit(
     } else {
         as_table(value)
     }
+}
+
+/// Format a byte count with a binary unit (`KiB`, `MiB`, ...), two decimals
+/// past the first kibibyte.
+fn human_bytes(n: u64) -> String {
+    const UNITS: [&str; 6] = ["B", "KiB", "MiB", "GiB", "TiB", "PiB"];
+    if n < 1024 {
+        return format!("{n} B");
+    }
+    let mut value = n as f64;
+    let mut unit = 0;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    format!("{value:.2} {}", UNITS[unit])
 }
 
 /// Content endpoints (`source`, `pod`) return text, not a document. Print it
