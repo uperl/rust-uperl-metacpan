@@ -11,8 +11,8 @@ anyhow = "1.0.104"
 
 
 [package.metadata.deb]
-maintainer = "Nobody <devnull@wdlabs.com>"
-copyright = "Nobody"
+maintainer = "Graham Ollis <devnull@wdlabs.com>"
+copyright = "Graham Ollis"
 extended-description = """\
 cli for metacpan"""
 section = "utils"
