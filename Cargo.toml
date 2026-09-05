@@ -1,0 +1,25 @@
+[package]
+name = "uperl-metacpan"
+version = "0.1.0"
+edition = "2024"
+description = "cli for metacpan"
+repository = "https://github.com/uperl/uperl-metacpan"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0.104"
+
+
+[package.metadata.deb]
+maintainer = "Nobody <devnull@wdlabs.com>"
+copyright = "Nobody"
+extended-description = """\
+cli for metacpan"""
+section = "utils"
+priority = "optional"
+assets = [
+    ["target/release/uperl-metacpan", "usr/bin/", "755"],
+    ["README.md", "usr/share/doc/uperl-metacpan/README.md", "644"],
+    ["LICENSE", "usr/share/doc/uperl-metacpan/LICENSE", "644"],
+]
+
