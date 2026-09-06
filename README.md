@@ -17,7 +17,7 @@ cargo install --path .
 ## Usage
 
 ```
-uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--color <auto|always|never>]
+uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|always|never>]
 ```
 
 | Subcommand | What it fetches |
@@ -47,6 +47,16 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--color <auto|always|never>]
 - `--no-cache` — bypass the response cache for this run.
 - `--cache-dir <DIR>` — override the cache directory.
 - `--base-url <URL>` — talk to a private MetaCPAN deployment.
+- `--raw` — instead of a table or JSON, print the raw HTTP request and response
+  for each request the command makes: the request line and headers, a blank
+  line, the response status line and headers, a blank line, then the body
+  verbatim. The cache is bypassed, and `download` prints both the
+  `download_url` lookup and the tarball fetch without writing a file. Does not
+  apply to `cache` subcommands.
+- `--curl` — print the equivalent `curl` command line and make no request.
+  `download` and `download-url` print the `download_url` lookup; the tarball URL
+  it resolves to is only known once that request runs. Does not apply to
+  `cache` subcommands, and cannot be combined with `--raw`.
 
 ### Caching
 
@@ -73,6 +83,8 @@ uperl-metacpan search --type release --query "author:PLICEASE AND status:latest"
 uperl-metacpan download-url FFI::Platypus --version "== 2.08"
 uperl-metacpan download FFI::Platypus --version "== 2.08"
 uperl-metacpan --json mirrors | jq '.[].name'
+uperl-metacpan --raw author PLICEASE
+uperl-metacpan --curl search --type release --query "author:PLICEASE" --size 5
 uperl-metacpan cache clear
 ```
 
