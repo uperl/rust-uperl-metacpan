@@ -522,22 +522,24 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
             dev,
         } => {
             let url = download_url_endpoint(client, module, version.as_deref(), *dev)?;
-            let body = raw_get(client, url).await?;
+            let (status, body) = raw_get(client, url).await?;
+            bail_on_http_error(status)?;
             if let Ok(d) = serde_json::from_slice::<DownloadUrl>(&body)
                 && let Some(tarball) = d.download_url.as_deref()
             {
                 let tarball = Url::parse(tarball)
                     .with_context(|| format!("parsing download URL {tarball}"))?;
                 println!();
-                raw_get(client, tarball).await?;
+                let (status, _) = raw_get(client, tarball).await?;
+                bail_on_http_error(status)?;
             }
             Ok(())
         }
 
         other => {
             let url = request_url(client, other)?;
-            raw_get(client, url).await?;
-            Ok(())
+            let (status, _) = raw_get(client, url).await?;
+            bail_on_http_error(status)
         }
     }
 }
@@ -551,11 +553,7 @@ fn run_curl(client: &Client, command: &Command) -> Result<()> {
         anyhow::bail!("--curl does not apply to `cache` subcommands; they make no HTTP requests");
     }
     let url = request_url(client, command)?;
-    println!(
-        "curl -A {} {}",
-        shell_quote(USER_AGENT),
-        shell_quote(url.as_str())
-    );
+    println!("curl {}", shell_quote(url.as_str()));
     Ok(())
 }
 
@@ -673,10 +671,10 @@ fn download_url_endpoint(
 
 /// GET `url`, printing the raw request and response to stdout: the request line
 /// and headers, a blank line, the response status line and headers, a blank
-/// line, then the body verbatim. Returns the response body bytes. A non-2xx
-/// status is printed like any other response, not turned into an error — the
-/// point of `--raw` is to see exactly what came back.
-async fn raw_get(client: &Client, url: Url) -> Result<Vec<u8>> {
+/// line, then the body verbatim. The full exchange is always printed, including
+/// for an error response; the returned status code lets the caller still exit
+/// non-zero on a `4xx`/`5xx`.
+async fn raw_get(client: &Client, url: Url) -> Result<(u16, Vec<u8>)> {
     let host = match url.port() {
         Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
         None => url.host_str().unwrap_or_default().to_string(),
@@ -707,7 +705,8 @@ async fn raw_get(client: &Client, url: Url) -> Result<Vec<u8>> {
         .await
         .with_context(|| format!("GET {url}"))?;
 
-    dump.push_str(&format!("{:?} {}\n", response.version(), response.status()));
+    let status = response.status();
+    dump.push_str(&format!("{:?} {status}\n", response.version()));
     append_headers(&mut dump, response.headers());
     dump.push('\n');
 
@@ -722,7 +721,16 @@ async fn raw_get(client: &Client, url: Url) -> Result<Vec<u8>> {
     }
     out.flush()?;
 
-    Ok(body.to_vec())
+    Ok((status.as_u16(), body.to_vec()))
+}
+
+/// After a raw exchange has been printed, turn a `4xx`/`5xx` status into a
+/// non-zero exit.
+fn bail_on_http_error(status: u16) -> Result<()> {
+    if status >= 400 {
+        anyhow::bail!("HTTP {status}");
+    }
+    Ok(())
 }
 
 /// Append `name: value` lines for every header to `dump`.
