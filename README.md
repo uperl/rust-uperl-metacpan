@@ -117,11 +117,13 @@ it co-maintains; passing both is the same as passing neither.
 `adoptable` lists every distribution up for adoption — one with a current
 release providing a namespace that the `ADOPTME` or `HANDOFF` pseudo-users own
 or co-maintain — with its CPAN River `total` and `immediate`, largest `total`
-first. It takes the same `--by total|immediate`, `--reverse`, and `--limit N`
-options as the `river` subcommands. It reads both authors' permissions,
-resolves each namespace to the distribution that currently provides it, and
-looks up River figures, so it makes many requests — every response is cached,
-so the first run takes a few seconds and re-runs are near-instant.
+first. A `handoff` column after the distribution name shows which of the two
+applies (`ADOPTME`, `HANDOFF`, or `ADOPTME,HANDOFF`). It takes the same
+`--by total|immediate`, `--reverse`, and `--limit N` options as the `river`
+subcommands. It reads both authors' permissions, resolves each namespace to the
+distribution that currently provides it, and looks up River figures, so it
+makes many requests — every response is cached, so the first run takes a few
+seconds and re-runs are near-instant.
 
 ### Examples
 

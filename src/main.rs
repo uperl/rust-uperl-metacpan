@@ -578,9 +578,12 @@ async fn main() -> Result<()> {
                 let mut rows = river_distribution(&client, distribution).await?;
                 let total = finish_river(&mut rows, *by, *reverse, *limit);
                 if g.json {
-                    print!("{}", json::to_string(&river_json(&rows, true), color));
+                    print!(
+                        "{}",
+                        json::to_string(&river_json(&rows, Some("author")), color)
+                    );
                 } else {
-                    render::river(&rows, true, color);
+                    render::river(&rows, Some("author"), color);
                     count_line(rows.len(), total, "direct reverse dependencies");
                 }
             }
@@ -594,9 +597,9 @@ async fn main() -> Result<()> {
                 let mut rows = river_author(&client, pauseid).await?;
                 let total = finish_river(&mut rows, *by, *reverse, *limit);
                 if g.json {
-                    print!("{}", json::to_string(&river_json(&rows, false), color));
+                    print!("{}", json::to_string(&river_json(&rows, None), color));
                 } else {
-                    render::river(&rows, false, color);
+                    render::river(&rows, None, color);
                     count_line(
                         rows.len(),
                         total,
@@ -660,9 +663,12 @@ async fn main() -> Result<()> {
             let mut rows = adoptable_rows(&client).await?;
             let total = finish_river(&mut rows, *by, *reverse, *limit);
             if g.json {
-                print!("{}", json::to_string(&river_json(&rows, false), color));
+                print!(
+                    "{}",
+                    json::to_string(&river_json(&rows, Some("handoff")), color)
+                );
             } else {
-                render::river(&rows, false, color);
+                render::river(&rows, Some("handoff"), color);
                 count_line(rows.len(), total, "adoptable distributions");
             }
         }
@@ -1078,18 +1084,18 @@ fn count_line(shown: usize, total: usize, noun: &str) {
     }
 }
 
-/// `[{ "distribution", ["author",] "river": { total, immediate, bucket } }]`
-/// for `--json`. The `author` key is included only when meaningful (it varies
-/// per row for `river distribution`; for `river author` every row is the same
-/// queried author, so it is left out).
-fn river_json(rows: &[render::RiverRow], include_author: bool) -> Value {
+/// `[{ "distribution", [<label_key>,] "river": { total, immediate, bucket } }]`
+/// for `--json`. `label_key` names the optional label field — `"author"` for
+/// `river distribution`, `"handoff"` for `adoptable` — and is omitted for
+/// `river author`, where every row is the same queried author.
+fn river_json(rows: &[render::RiverRow], label_key: Option<&str>) -> Value {
     let arr = rows
         .iter()
         .map(|r| {
             let mut obj = serde_json::Map::new();
             obj.insert("distribution".into(), json!(r.distribution));
-            if include_author {
-                obj.insert("author".into(), json!(r.author));
+            if let Some(key) = label_key {
+                obj.insert(key.to_owned(), json!(r.label));
             }
             obj.insert(
                 "river".into(),
@@ -1150,7 +1156,7 @@ async fn author_release_rows(client: &Client, pauseid: &str) -> Result<Vec<rende
             if seen.insert(dist.to_owned()) {
                 rows.push(render::RiverRow {
                     distribution: dist.to_owned(),
-                    author: None,
+                    label: None,
                     total: None,
                     immediate: None,
                     bucket: None,
@@ -1207,7 +1213,7 @@ async fn reverse_dependency_rows(
             if seen.insert(name.to_owned()) {
                 rows.push(render::RiverRow {
                     distribution: name.to_owned(),
-                    author: item
+                    label: item
                         .get("author")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
@@ -1294,25 +1300,33 @@ async fn post_json_retry(client: &Client, path: &str, body: &Value) -> Result<Va
 
 /// Rows for `adoptable`: every distribution with a current release providing a
 /// module namespace that ADOPTME or HANDOFF owns or co-maintains, with River
-/// figures filled in. Unordered.
+/// figures filled in and the label set to which of the two (or both) applies.
+/// Unordered.
 async fn adoptable_rows(client: &Client) -> Result<Vec<render::RiverRow>> {
-    use std::collections::BTreeSet;
+    use std::collections::BTreeMap;
 
-    // 1. Namespaces the two hand-off authors own or co-maintain.
-    let mut modules: BTreeSet<String> = BTreeSet::new();
-    for who in ["ADOPTME", "HANDOFF"] {
+    // 1. namespace -> (has ADOPTME perm, has HANDOFF perm)
+    let mut namespaces: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for (who, adoptme) in [("ADOPTME", true), ("HANDOFF", false)] {
         let perms = client
             .permissions_by_author(who)
             .await
             .with_context(|| format!("fetching {who} permissions"))?;
-        modules.extend(perms.into_iter().filter_map(|p| p.module_name));
+        for module in perms.into_iter().filter_map(|p| p.module_name) {
+            let flags = namespaces.entry(module).or_default();
+            if adoptme {
+                flags.0 = true;
+            } else {
+                flags.1 = true;
+            }
+        }
     }
-    let modules: Vec<String> = modules.into_iter().collect();
+    let module_names: Vec<&str> = namespaces.keys().map(String::as_str).collect();
 
-    // 2. Resolve each namespace to the distribution that currently provides it
-    //    (authorized file in the latest release).
-    let mut dists: BTreeSet<String> = BTreeSet::new();
-    for chunk in modules.chunks(250) {
+    // 2. Resolve namespaces to the distribution that currently provides them
+    //    (authorized file in the latest release), carrying the flags across.
+    let mut dists: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for chunk in module_names.chunks(250) {
         let body = json!({
             "query": { "bool": { "filter": [
                 { "terms": { "module.name": chunk } },
@@ -1320,7 +1334,7 @@ async fn adoptable_rows(client: &Client) -> Result<Vec<render::RiverRow>> {
                 { "term": { "status": "latest" } },
             ]}},
             "size": chunk.len() * 3,
-            "_source": ["distribution"],
+            "_source": ["distribution", "module.name"],
         });
         let v = post_json_retry(client, "file/_search", &body)
             .await
@@ -1331,8 +1345,20 @@ async fn adoptable_rows(client: &Client) -> Result<Vec<render::RiverRow>> {
             .and_then(Value::as_array)
             .unwrap_or(&empty);
         for hit in hits {
-            if let Some(d) = hit.pointer("/_source/distribution").and_then(Value::as_str) {
-                dists.insert(d.to_owned());
+            let Some(dist) = hit.pointer("/_source/distribution").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(mods) = hit.pointer("/_source/module").and_then(Value::as_array) else {
+                continue;
+            };
+            for m in mods {
+                if let Some(name) = m.get("name").and_then(Value::as_str)
+                    && let Some(&(adoptme, handoff)) = namespaces.get(name)
+                {
+                    let flags = dists.entry(dist.to_owned()).or_insert((false, false));
+                    flags.0 |= adoptme;
+                    flags.1 |= handoff;
+                }
             }
         }
     }
@@ -1340,12 +1366,20 @@ async fn adoptable_rows(client: &Client) -> Result<Vec<render::RiverRow>> {
     // 3. River figures.
     let mut rows: Vec<render::RiverRow> = dists
         .into_iter()
-        .map(|distribution| render::RiverRow {
-            distribution,
-            author: None,
-            total: None,
-            immediate: None,
-            bucket: None,
+        .map(|(distribution, (adoptme, handoff))| {
+            let label = match (adoptme, handoff) {
+                (true, true) => "ADOPTME,HANDOFF",
+                (true, false) => "ADOPTME",
+                (false, true) => "HANDOFF",
+                (false, false) => "-",
+            };
+            render::RiverRow {
+                distribution,
+                label: Some(label.to_owned()),
+                total: None,
+                immediate: None,
+                bucket: None,
+            }
         })
         .collect();
     fill_river(client, &mut rows).await?;
