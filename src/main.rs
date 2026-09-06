@@ -317,7 +317,7 @@ enum Command {
     ///
     /// Reads both authors' permissions, resolves the namespaces to the
     /// distributions that currently provide them, and looks up River figures,
-    /// so it makes many requests.
+    /// so it makes multiple requests.
     Adoptable {
         /// Which CPAN River figure to sort on.
         #[arg(long, value_enum, default_value = "total")]
@@ -713,7 +713,7 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
             anyhow::bail!("--raw does not apply to `river` subcommands; they make several requests")
         }
         Command::Adoptable { .. } => {
-            anyhow::bail!("--raw does not apply to `adoptable`; it makes many requests")
+            anyhow::bail!("--raw does not apply to `adoptable`; it makes multiple requests")
         }
 
         // `download` makes two requests: the download_url lookup, then a GET of
@@ -763,7 +763,7 @@ fn run_curl(client: &Client, command: &Command) -> Result<()> {
             )
         }
         Command::Adoptable { .. } => {
-            anyhow::bail!("--curl does not apply to `adoptable`; it makes many requests")
+            anyhow::bail!("--curl does not apply to `adoptable`; it makes multiple requests")
         }
         _ => {}
     }
