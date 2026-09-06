@@ -33,11 +33,11 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
 | `download-url <MODULE> [--version <RANGE>] [--dev]` | the archive that satisfies a module request |
 | `download <MODULE> [--version <RANGE>] [--dev]` | download that archive into the current directory and verify its SHA-256 |
 | `mirrors` | known CPAN mirrors |
-| `river distribution <DIST> [--by total\|immediate] [--reverse]` | the distribution's direct reverse dependencies (with each one's latest-release author), ordered by CPAN River total |
-| `river author <PAUSEID> [--by total\|immediate] [--reverse]` | the distributions whose current (latest, non-dev) release is by that author, ordered by CPAN River total |
+| `river distribution <DIST> [--by total\|immediate] [--reverse] [--limit N]` | the distribution's direct reverse dependencies (with each one's latest-release author), ordered by CPAN River total |
+| `river author <PAUSEID> [--by total\|immediate] [--reverse] [--limit N]` | the distributions whose current (latest, non-dev) release is by that author, ordered by CPAN River total |
 | `permissions module <MODULE>...` | PAUSE upload permissions (`06perms`) for one or more module namespaces |
 | `permissions author <PAUSEID> [--owner] [--comaint]` | every module namespace a PAUSE id owns or co-maintains |
-| `adoptable [--by total\|immediate] [--reverse]` | distributions up for adoption (ADOPTME / HANDOFF permissions), with River figures, most-depended-on first |
+| `adoptable [--by total\|immediate] [--reverse] [--limit N]` | distributions up for adoption (ADOPTME / HANDOFF permissions), with River figures, most-depended-on first |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
 | `cache path` | print the cache directory |
 | `cache status` | show the cache location, entry count, and disk space used (actual blocks allocated, like `du`) |
@@ -84,7 +84,8 @@ Check how much space it uses with `uperl-metacpan cache status`, clear it with
 `river distribution <DIST>` lists the distributions whose latest release
 depends directly on `<DIST>`, ordered by their CPAN River total (transitive
 downstream count), largest first. Pass `--by immediate` to sort on the direct
-dependent count instead, and `--reverse` to sort smallest first. Each row also
+dependent count instead, `--reverse` to sort smallest first, and `--limit N` to
+print only the top N rows. Each row also
 shows the `author` (PAUSE id) of that distribution's most recent production
 release. It pages through the reverse-dependency list and then looks up the
 River figures for those distributions, so it makes several requests; every
@@ -97,8 +98,8 @@ a note on stderr and lists the 900 it could retrieve.
 
 `river author <PAUSEID>` lists the distributions whose current (latest,
 non-dev) release was uploaded by that author — a view of which of an author's
-distributions sit highest up the river. It takes the same `--by` and
-`--reverse` options; the `author` column is omitted since every row is the
+distributions sit highest up the river. It takes the same `--by`, `--reverse`,
+and `--limit` options; the `author` column is omitted since every row is the
 queried author.
 
 ### Permissions
@@ -115,11 +116,11 @@ it co-maintains; passing both is the same as passing neither.
 `adoptable` lists every distribution up for adoption — one with a current
 release providing a namespace that the `ADOPTME` or `HANDOFF` pseudo-users own
 or co-maintain — with its CPAN River `total` and `immediate`, largest `total`
-first. It takes the same `--by total|immediate` and `--reverse` options as the
-`river` subcommands. It reads both authors' permissions, resolves each
-namespace to the distribution that currently provides it, and looks up River
-figures, so it makes many requests — every response is cached, so the first
-run takes a few seconds and re-runs are near-instant.
+first. It takes the same `--by total|immediate`, `--reverse`, and `--limit N`
+options as the `river` subcommands. It reads both authors' permissions,
+resolves each namespace to the distribution that currently provides it, and
+looks up River figures, so it makes many requests — every response is cached,
+so the first run takes a few seconds and re-runs are near-instant.
 
 ### Examples
 

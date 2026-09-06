@@ -140,6 +140,9 @@ enum RiverAction {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
+        /// Print only the first N rows after sorting.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 
     /// List the distributions whose current (latest, non-dev) release is by an
@@ -157,6 +160,9 @@ enum RiverAction {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
+        /// Print only the first N rows after sorting.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 }
 
@@ -325,6 +331,9 @@ enum Command {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
+        /// Print only the first N rows after sorting.
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 
     /// Search a document type with a Lucene query string.
@@ -564,13 +573,15 @@ async fn main() -> Result<()> {
                 distribution,
                 by,
                 reverse,
+                limit,
             } => {
-                let rows = river_distribution(&client, distribution, *by, *reverse).await?;
+                let mut rows = river_distribution(&client, distribution, *by, *reverse).await?;
+                let total = apply_limit(&mut rows, *limit);
                 if g.json {
                     print!("{}", json::to_string(&river_json(&rows, true), color));
                 } else {
                     render::river(&rows, true, color);
-                    println!("{} direct reverse dependencies", rows.len());
+                    count_line(rows.len(), total, "direct reverse dependencies");
                 }
             }
 
@@ -578,15 +589,18 @@ async fn main() -> Result<()> {
                 pauseid,
                 by,
                 reverse,
+                limit,
             } => {
-                let rows = river_author(&client, pauseid, *by, *reverse).await?;
+                let mut rows = river_author(&client, pauseid, *by, *reverse).await?;
+                let total = apply_limit(&mut rows, *limit);
                 if g.json {
                     print!("{}", json::to_string(&river_json(&rows, false), color));
                 } else {
                     render::river(&rows, false, color);
-                    println!(
-                        "{} distributions with a current release by {pauseid}",
-                        rows.len()
+                    count_line(
+                        rows.len(),
+                        total,
+                        &format!("distributions with a current release by {pauseid}"),
                     );
                 }
             }
@@ -642,14 +656,15 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Adoptable { by, reverse } => {
+        Command::Adoptable { by, reverse, limit } => {
             let mut rows = adoptable_rows(&client).await?;
             sort_river(&mut rows, *by, *reverse);
+            let total = apply_limit(&mut rows, *limit);
             if g.json {
                 print!("{}", json::to_string(&river_json(&rows, false), color));
             } else {
                 render::river(&rows, false, color);
-                println!("{} adoptable distributions", rows.len());
+                count_line(rows.len(), total, "adoptable distributions");
             }
         }
 
@@ -1050,6 +1065,26 @@ fn sort_river(rows: &mut [render::RiverRow], by: RiverSort, reverse: bool) {
             .then_with(|| a.distribution.cmp(&b.distribution));
         if reverse { ord.reverse() } else { ord }
     });
+}
+
+/// Apply `--limit` in place, keeping the first `n` rows, and return the count
+/// before truncation (for the "showing X of N" summary).
+fn apply_limit(rows: &mut Vec<render::RiverRow>, limit: Option<usize>) -> usize {
+    let total = rows.len();
+    if let Some(n) = limit {
+        rows.truncate(n);
+    }
+    total
+}
+
+/// The trailing count line: `N <noun>`, or `showing X of N <noun>` when
+/// `--limit` trimmed the list.
+fn count_line(shown: usize, total: usize, noun: &str) {
+    if shown < total {
+        println!("showing {shown} of {total} {noun}");
+    } else {
+        println!("{total} {noun}");
+    }
 }
 
 /// `[{ "distribution", ["author",] "river": { total, immediate, bucket } }]`
