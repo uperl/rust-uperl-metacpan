@@ -311,6 +311,15 @@ enum Command {
         action: PermissionsAction,
     },
 
+    /// List distributions up for adoption — those with a current release
+    /// providing a module namespace that ADOPTME or HANDOFF owns or
+    /// co-maintains — with their CPAN River figures, most-depended-on first.
+    ///
+    /// Reads both authors' permissions, resolves the namespaces to the
+    /// distributions that currently provide them, and looks up River figures,
+    /// so it makes many requests.
+    Adoptable,
+
     /// Search a document type with a Lucene query string.
     Search {
         /// Document type: release, author, module, file, distribution, favorite.
@@ -626,6 +635,23 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::Adoptable => {
+            let mut rows = adoptable_rows(&client).await?;
+            rows.sort_by(|a, b| {
+                b.total
+                    .unwrap_or(0)
+                    .cmp(&a.total.unwrap_or(0))
+                    .then(b.immediate.unwrap_or(0).cmp(&a.immediate.unwrap_or(0)))
+                    .then_with(|| a.distribution.cmp(&b.distribution))
+            });
+            if g.json {
+                print!("{}", json::to_string(&river_json(&rows, false), color));
+            } else {
+                render::river(&rows, false, color);
+                println!("{} adoptable distributions", rows.len());
+            }
+        }
+
         Command::Search {
             r#type,
             query,
@@ -685,6 +711,9 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
         Command::River { .. } => {
             anyhow::bail!("--raw does not apply to `river` subcommands; they make several requests")
         }
+        Command::Adoptable => {
+            anyhow::bail!("--raw does not apply to `adoptable`; it makes many requests")
+        }
 
         // `download` makes two requests: the download_url lookup, then a GET of
         // the tarball it resolves to. Show both.
@@ -731,6 +760,9 @@ fn run_curl(client: &Client, command: &Command) -> Result<()> {
             anyhow::bail!(
                 "--curl does not apply to `river` subcommands; they make several requests"
             )
+        }
+        Command::Adoptable => {
+            anyhow::bail!("--curl does not apply to `adoptable`; it makes many requests")
         }
         _ => {}
     }
@@ -844,7 +876,7 @@ fn request_url(client: &Client, command: &Command) -> Result<Url> {
             url
         }
 
-        Command::Cache { .. } | Command::River { .. } => {
+        Command::Cache { .. } | Command::River { .. } | Command::Adoptable => {
             unreachable!("--raw / --curl reject these subcommands before this point")
         }
     };
@@ -1192,8 +1224,7 @@ async fn fill_river(client: &Client, rows: &mut [render::RiverRow]) -> Result<()
             "size": chunk.len(),
             "_source": ["name", "river"],
         });
-        let v: Value = client
-            .post_json("distribution/_search", &body)
+        let v = post_json_retry(client, "distribution/_search", &body)
             .await
             .context("searching distribution river data")?;
         let empty = Vec::new();
@@ -1216,6 +1247,82 @@ async fn fill_river(client: &Client, rows: &mut [render::RiverRow]) -> Result<()
         }
     }
     Ok(())
+}
+
+/// `POST {path}` with a JSON body, parsed as `Value`, retrying briefly on a
+/// `5xx` — the `_search` endpoints return one intermittently under load.
+async fn post_json_retry(client: &Client, path: &str, body: &Value) -> Result<Value> {
+    for attempt in 1..=3u32 {
+        match client.post_json::<Value, Value>(path, body).await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < 3 && e.status().is_some_and(|s| s >= 500) => {
+                let backoff = std::time::Duration::from_millis(u64::from(attempt) * 400);
+                tokio::time::sleep(backoff).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("the final attempt returns Ok or Err")
+}
+
+/// Rows for `adoptable`: every distribution with a current release providing a
+/// module namespace that ADOPTME or HANDOFF owns or co-maintains, with River
+/// figures filled in. Unordered.
+async fn adoptable_rows(client: &Client) -> Result<Vec<render::RiverRow>> {
+    use std::collections::BTreeSet;
+
+    // 1. Namespaces the two hand-off authors own or co-maintain.
+    let mut modules: BTreeSet<String> = BTreeSet::new();
+    for who in ["ADOPTME", "HANDOFF"] {
+        let perms = client
+            .permissions_by_author(who)
+            .await
+            .with_context(|| format!("fetching {who} permissions"))?;
+        modules.extend(perms.into_iter().filter_map(|p| p.module_name));
+    }
+    let modules: Vec<String> = modules.into_iter().collect();
+
+    // 2. Resolve each namespace to the distribution that currently provides it
+    //    (authorized file in the latest release).
+    let mut dists: BTreeSet<String> = BTreeSet::new();
+    for chunk in modules.chunks(250) {
+        let body = json!({
+            "query": { "bool": { "filter": [
+                { "terms": { "module.name": chunk } },
+                { "term": { "authorized": true } },
+                { "term": { "status": "latest" } },
+            ]}},
+            "size": chunk.len() * 3,
+            "_source": ["distribution"],
+        });
+        let v = post_json_retry(client, "file/_search", &body)
+            .await
+            .context("resolving namespaces to distributions")?;
+        let empty = Vec::new();
+        let hits = v
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        for hit in hits {
+            if let Some(d) = hit.pointer("/_source/distribution").and_then(Value::as_str) {
+                dists.insert(d.to_owned());
+            }
+        }
+    }
+
+    // 3. River figures.
+    let mut rows: Vec<render::RiverRow> = dists
+        .into_iter()
+        .map(|distribution| render::RiverRow {
+            distribution,
+            author: None,
+            total: None,
+            immediate: None,
+            bucket: None,
+        })
+        .collect();
+    fill_river(client, &mut rows).await?;
+    Ok(rows)
 }
 
 /// Some endpoints wrap their payload in a single-key envelope (`release`,
