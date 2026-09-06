@@ -3,7 +3,8 @@
 //! Each MetaCPAN document type is a subcommand. Results print as a formatted
 //! table by default; `--json` switches to pretty-printed JSON, coloured when
 //! stdout is a terminal (override with `--color`); `--raw` prints the
-//! underlying HTTP request and response instead.
+//! underlying HTTP request and response instead, and `--curl` prints the
+//! equivalent `curl` command line without making the request.
 
 mod diskusage;
 mod json;
@@ -70,6 +71,10 @@ struct GlobalOpts {
     /// body — for each request the command makes, instead of a table or JSON.
     #[arg(long, global = true)]
     raw: bool,
+
+    /// Print the equivalent `curl` command line instead of making the request.
+    #[arg(long, global = true, conflicts_with = "raw")]
+    curl: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -250,6 +255,10 @@ async fn main() -> Result<()> {
 
     if g.raw {
         return run_raw(&client, &cli.command).await;
+    }
+
+    if g.curl {
+        return run_curl(&client, &cli.command);
     }
 
     match &cli.command {
@@ -526,16 +535,39 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
         }
 
         other => {
-            let url = raw_request_url(client, other)?;
+            let url = request_url(client, other)?;
             raw_get(client, url).await?;
             Ok(())
         }
     }
 }
 
-/// The single request URL for each command that makes exactly one GET. Mirrors
-/// the path and query each command's normal code path builds.
-fn raw_request_url(client: &Client, command: &Command) -> Result<Url> {
+/// `--curl`: print the `curl` command line equivalent to the request the
+/// command would make, without making it. `download` and `download-url` print
+/// the `download_url` lookup; the tarball URL it resolves to is only knowable
+/// by running that request.
+fn run_curl(client: &Client, command: &Command) -> Result<()> {
+    if let Command::Cache { .. } = command {
+        anyhow::bail!("--curl does not apply to `cache` subcommands; they make no HTTP requests");
+    }
+    let url = request_url(client, command)?;
+    println!(
+        "curl -A {} {}",
+        shell_quote(USER_AGENT),
+        shell_quote(url.as_str())
+    );
+    Ok(())
+}
+
+/// Single-quote `s` for a POSIX shell, so it survives the shell verbatim.
+fn shell_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', r"'\''"))
+}
+
+/// The single request URL for each command that makes exactly one GET (and, for
+/// `download`, the first of its two). Mirrors the path and query each command's
+/// normal code path builds.
+fn request_url(client: &Client, command: &Command) -> Result<Url> {
     let url = match command {
         Command::Author { pauseid } => client.url(&format!("author/{pauseid}"))?,
 
@@ -584,6 +616,11 @@ fn raw_request_url(client: &Client, command: &Command) -> Result<Url> {
             module,
             version,
             dev,
+        }
+        | Command::Download {
+            module,
+            version,
+            dev,
         } => download_url_endpoint(client, module, version.as_deref(), *dev)?,
 
         Command::Mirrors => client.url("mirror")?,
@@ -608,9 +645,7 @@ fn raw_request_url(client: &Client, command: &Command) -> Result<Url> {
             url
         }
 
-        Command::Cache { .. } | Command::Download { .. } => {
-            unreachable!("handled directly in run_raw")
-        }
+        Command::Cache { .. } => unreachable!("--raw / --curl reject `cache` before this point"),
     };
     Ok(url)
 }
