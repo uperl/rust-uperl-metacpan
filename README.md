@@ -33,8 +33,11 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
 | `download-url <MODULE> [--version <RANGE>] [--dev]` | the archive that satisfies a module request |
 | `download <MODULE> [--version <RANGE>] [--dev]` | download that archive into the current directory and verify its SHA-256 |
 | `mirrors` | known CPAN mirrors |
-| `river distribution <DIST> [--by total\|immediate] [--reverse]` | the distribution's direct reverse dependencies (with each one's latest-release author), ordered by CPAN River total |
-| `river author <PAUSEID> [--by total\|immediate] [--reverse]` | the distributions whose current (latest, non-dev) release is by that author, ordered by CPAN River total |
+| `river distribution <DIST> [--by total\|immediate] [--reverse] [--limit N]` | the distribution's direct reverse dependencies (with each one's latest-release author), ordered by CPAN River total |
+| `river author <PAUSEID> [--by total\|immediate] [--reverse] [--limit N]` | the distributions whose current (latest, non-dev) release is by that author, ordered by CPAN River total |
+| `permissions module <MODULE>...` | PAUSE upload permissions (`06perms`) for one or more module namespaces |
+| `permissions author <PAUSEID> [--owner] [--comaint]` | every module namespace a PAUSE id owns or co-maintains |
+| `adoptable [--by total\|immediate] [--reverse] [--limit N]` | distributions up for adoption (ADOPTME / HANDOFF permissions), with River figures, most-depended-on first |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
 | `cache path` | print the cache directory |
 | `cache status` | show the cache location, entry count, and disk space used (actual blocks allocated, like `du`) |
@@ -63,8 +66,9 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
 
 ### Caching
 
-Successful GET responses are cached on disk for one hour. The default location
-is the platform cache directory:
+Successful responses are cached on disk for one hour — every GET, and the
+`_search` POSTs that back `river` and `adoptable` too (keyed by URL and request
+body). The default location is the platform cache directory:
 
 | Platform | Default cache directory |
 | --- | --- |
@@ -79,13 +83,15 @@ Check how much space it uses with `uperl-metacpan cache status`, clear it with
 
 `river distribution <DIST>` lists the distributions whose latest release
 depends directly on `<DIST>`, ordered by their CPAN River total (transitive
-downstream count), largest first. Pass `--by immediate` to sort on the direct
-dependent count instead, and `--reverse` to sort smallest first. Each row also
+downstream count), largest first. Pass `--by immediate` to rank on the direct
+dependent count instead, `--limit N` to keep only the top N, and `--reverse` to
+show that list smallest-first (with `--limit`, still the top N — just flipped).
+Each row also
 shows the `author` (PAUSE id) of that distribution's most recent production
 release. It pages through the reverse-dependency list and then looks up the
-River figures for those distributions, so it makes several requests; responses
-are cached like any other GET. A distribution with no River data on MetaCPAN is
-still listed, with `-` for its figures.
+River figures for those distributions, so it makes several requests; every
+response is cached, so a re-run within the hour is fast. A distribution with no
+River data on MetaCPAN is still listed, with `-` for its figures.
 
 MetaCPAN's `reverse_dependencies` endpoint only serves its first ~900 results;
 for a distribution with more reverse dependencies than that, the command prints
@@ -93,9 +99,32 @@ a note on stderr and lists the 900 it could retrieve.
 
 `river author <PAUSEID>` lists the distributions whose current (latest,
 non-dev) release was uploaded by that author — a view of which of an author's
-distributions sit highest up the river. It takes the same `--by` and
-`--reverse` options; the `author` column is omitted since every row is the
+distributions sit highest up the river. It takes the same `--by`, `--reverse`,
+and `--limit` options; the `author` column is omitted since every row is the
 queried author.
+
+### Permissions
+
+`permissions module <MODULE>...` shows the PAUSE `06perms` entry — primary
+`owner` and `co-maintainers` — for each namespace. One module is a direct
+lookup (a namespace with no entry is an error); two or more are fetched in a
+single `by_module` request and unknown namespaces are simply omitted.
+
+`permissions author <PAUSEID>` lists every namespace that id owns or
+co-maintains. `--owner` keeps only the ones it owns, `--comaint` only the ones
+it co-maintains; passing both is the same as passing neither.
+
+`adoptable` lists every distribution up for adoption — one with a current
+release providing a namespace that the `ADOPTME` or `HANDOFF` pseudo-users own
+or co-maintain — with its CPAN River `total` and `immediate`, largest `total`
+first. A `pause id` column after the distribution name shows which of the two
+applies (`ADOPTME`, `HANDOFF`, or `ADOPTME,HANDOFF`); it is `pauseid` in
+`--json`. It takes the same
+`--by total|immediate`, `--reverse`, and `--limit N` options as the `river`
+subcommands. It reads both authors' permissions, resolves each namespace to the
+distribution that currently provides it, and looks up River figures, so it
+makes many requests — every response is cached, so the first run takes a few
+seconds and re-runs are near-instant.
 
 ### Examples
 
@@ -110,6 +139,9 @@ uperl-metacpan download FFI::Platypus --version "== 2.08"
 uperl-metacpan --json mirrors | jq '.[].name'
 uperl-metacpan river distribution Try-Tiny
 uperl-metacpan river author PLICEASE --by immediate
+uperl-metacpan permissions module Moose Try::Tiny
+uperl-metacpan permissions author PLICEASE --json
+uperl-metacpan adoptable
 uperl-metacpan --raw author PLICEASE
 uperl-metacpan --curl search --type release --query "author:PLICEASE" --size 5
 uperl-metacpan cache clear

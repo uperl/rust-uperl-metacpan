@@ -10,7 +10,7 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result};
 use comfy_table::{Attribute, Cell, ContentArrangement, Table, presets::UTF8_FULL};
 use metacpan_api_modern::types::{
-    Author, Changes, Distribution, DownloadUrl, File, Mirror, Release,
+    Author, Changes, Distribution, DownloadUrl, File, Mirror, Permission, Release,
 };
 use serde_json::Value;
 
@@ -307,33 +307,33 @@ pub fn mirrors(value: Value, color: bool) -> Result<()> {
     Ok(())
 }
 
-/// One row of `river` output: a distribution, optionally the author of its
-/// most recent production release, and its CPAN River figures. Every optional
-/// field is `None` when the API had no value for it.
+/// One row of `river` / `adoptable` output: a distribution, an optional label
+/// column shown right after it (the latest-release author for `river
+/// distribution`, the `ADOPTME`/`HANDOFF` status for `adoptable`), and its
+/// CPAN River figures. Every optional field is `None` when there is no value.
 pub struct RiverRow {
     pub distribution: String,
-    pub author: Option<String>,
+    pub label: Option<String>,
     pub total: Option<u64>,
     pub immediate: Option<u64>,
     pub bucket: Option<u64>,
 }
 
-/// Print the `river` table, in the order given. `show_author` adds the
-/// `author` column (`river distribution`); `river author` omits it since every
-/// row is the same queried author. The caller prints its own summary line.
-pub fn river(rows: &[RiverRow], show_author: bool, color: bool) {
+/// Print the `river` table, in the order given. `label_header`, when set, adds
+/// the label column right after `distribution` under that heading; `river
+/// author` passes `None` since every row is the same queried author. The
+/// caller prints its own summary line.
+pub fn river(rows: &[RiverRow], label_header: Option<&str>, color: bool) {
     let mut cols = vec!["distribution"];
-    if show_author {
-        cols.push("author");
-    }
+    cols.extend(label_header);
     cols.extend(["river total", "river immediate", "bucket"]);
 
     let mut t = table();
     t.set_header(header(cols, color));
     for r in rows {
         let mut cells = vec![Cell::new(&r.distribution)];
-        if show_author {
-            cells.push(Cell::new(r.author.as_deref().unwrap_or("-")));
+        if label_header.is_some() {
+            cells.push(Cell::new(r.label.as_deref().unwrap_or("-")));
         }
         cells.push(Cell::new(opt_num(r.total)));
         cells.push(Cell::new(opt_num(r.immediate)));
@@ -346,6 +346,28 @@ pub fn river(rows: &[RiverRow], show_author: bool, color: bool) {
 /// A count for a table cell, or `-` when the API had no number for it.
 fn opt_num(n: Option<u64>) -> String {
     n.map_or_else(|| "-".to_string(), |n| n.to_string())
+}
+
+/// Print a `module / owner / co-maintainers` table for `permissions`.
+pub fn permissions(perms: &[Permission], color: bool) {
+    let mut t = table();
+    t.set_header(header(["module", "owner", "co-maintainers"], color));
+    for p in perms {
+        let co = if p.co_maintainers.is_empty() {
+            "-".to_string()
+        } else {
+            p.co_maintainers.join(", ")
+        };
+        t.add_row(vec![
+            Cell::new(p.module_name.as_deref().unwrap_or("-")),
+            Cell::new(p.owner.as_deref().unwrap_or("-")),
+            Cell::new(co),
+        ]);
+    }
+    println!("{t}");
+    if perms.len() != 1 {
+        println!("{} modules", perms.len());
+    }
 }
 
 pub fn search(value: Value, type_: &str, color: bool) -> Result<()> {

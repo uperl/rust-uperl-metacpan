@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use metacpan_api_modern::reqwest::Url;
-use metacpan_api_modern::types::DownloadUrl;
+use metacpan_api_modern::types::{DownloadUrl, Permission};
 use metacpan_api_modern::{Client, PodFormat};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -140,6 +140,9 @@ enum RiverAction {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
+        /// Print only the top N rows (with --reverse, the top N shown smallest-first).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 
     /// List the distributions whose current (latest, non-dev) release is by an
@@ -157,6 +160,38 @@ enum RiverAction {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
+        /// Print only the top N rows (with --reverse, the top N shown smallest-first).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PermissionsAction {
+    /// PAUSE upload permissions for one or more module namespaces.
+    ///
+    /// One module is a `GET /permission/{module}` (a missing namespace is an
+    /// error); two or more use `GET /permission/by_module` in a single
+    /// request, where a namespace with no `06perms` entry is just absent.
+    Module {
+        /// Module namespace, e.g. Moose. Repeat for a batch lookup.
+        #[arg(required = true, value_name = "MODULE")]
+        modules: Vec<String>,
+    },
+
+    /// Every module namespace a PAUSE id owns or co-maintains.
+    ///
+    /// `GET /permission/by_author/{pauseid}`. `--owner` and `--comaint` filter
+    /// the result client-side; giving both is the same as giving neither.
+    Author {
+        /// PAUSE id, e.g. PLICEASE (case-insensitive).
+        pauseid: String,
+        /// Keep only namespaces where PAUSEID is the primary owner.
+        #[arg(long)]
+        owner: bool,
+        /// Keep only namespaces where PAUSEID is a co-maintainer.
+        #[arg(long)]
+        comaint: bool,
     },
 }
 
@@ -274,6 +309,31 @@ enum Command {
     River {
         #[command(subcommand)]
         action: RiverAction,
+    },
+
+    /// PAUSE upload permissions (`06perms`): who may release a module.
+    Permissions {
+        #[command(subcommand)]
+        action: PermissionsAction,
+    },
+
+    /// List distributions up for adoption — those with a current release
+    /// providing a module namespace that ADOPTME or HANDOFF owns or
+    /// co-maintains — with their CPAN River figures, most-depended-on first.
+    ///
+    /// Reads both authors' permissions, resolves the namespaces to the
+    /// distributions that currently provide them, and looks up River figures,
+    /// so it makes multiple requests.
+    Adoptable {
+        /// Which CPAN River figure to sort on.
+        #[arg(long, value_enum, default_value = "total")]
+        by: RiverSort,
+        /// Sort ascending (smallest first) instead of descending.
+        #[arg(long)]
+        reverse: bool,
+        /// Print only the top N rows (with --reverse, the top N shown smallest-first).
+        #[arg(long, value_name = "N")]
+        limit: Option<usize>,
     },
 
     /// Search a document type with a Lucene query string.
@@ -513,13 +573,18 @@ async fn main() -> Result<()> {
                 distribution,
                 by,
                 reverse,
+                limit,
             } => {
-                let rows = river_distribution(&client, distribution, *by, *reverse).await?;
+                let mut rows = river_distribution(&client, distribution).await?;
+                let total = finish_river(&mut rows, *by, *reverse, *limit);
                 if g.json {
-                    print!("{}", json::to_string(&river_json(&rows, true), color));
+                    print!(
+                        "{}",
+                        json::to_string(&river_json(&rows, Some("author")), color)
+                    );
                 } else {
-                    render::river(&rows, true, color);
-                    println!("{} direct reverse dependencies", rows.len());
+                    render::river(&rows, Some("author"), color);
+                    count_line(rows.len(), total, "direct reverse dependencies");
                 }
             }
 
@@ -527,19 +592,86 @@ async fn main() -> Result<()> {
                 pauseid,
                 by,
                 reverse,
+                limit,
             } => {
-                let rows = river_author(&client, pauseid, *by, *reverse).await?;
+                let mut rows = river_author(&client, pauseid).await?;
+                let total = finish_river(&mut rows, *by, *reverse, *limit);
                 if g.json {
-                    print!("{}", json::to_string(&river_json(&rows, false), color));
+                    print!("{}", json::to_string(&river_json(&rows, None), color));
                 } else {
-                    render::river(&rows, false, color);
-                    println!(
-                        "{} distributions with a current release by {pauseid}",
-                        rows.len()
+                    render::river(&rows, None, color);
+                    count_line(
+                        rows.len(),
+                        total,
+                        &format!("distributions with a current release by {pauseid}"),
                     );
                 }
             }
         },
+
+        Command::Permissions { action } => {
+            let perms = match action {
+                PermissionsAction::Module { modules } => match modules.as_slice() {
+                    [only] => vec![
+                        client
+                            .permission(only)
+                            .await
+                            .with_context(|| format!("fetching permissions for {only}"))?,
+                    ],
+                    many => client
+                        .permissions_by_module(many)
+                        .await
+                        .context("fetching permissions")?,
+                },
+                PermissionsAction::Author {
+                    pauseid,
+                    owner,
+                    comaint,
+                } => {
+                    // The by_author endpoint matches the PAUSE id exactly, and
+                    // PAUSE ids are upper-case.
+                    let pauseid = pauseid.to_uppercase();
+                    let mut perms = client
+                        .permissions_by_author(&pauseid)
+                        .await
+                        .with_context(|| format!("fetching permissions for {pauseid}"))?;
+                    if *owner || *comaint {
+                        perms.retain(|p| {
+                            let is_owner = p
+                                .owner
+                                .as_deref()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(&pauseid));
+                            let is_comaint = p
+                                .co_maintainers
+                                .iter()
+                                .any(|c| c.eq_ignore_ascii_case(&pauseid));
+                            (*owner && is_owner) || (*comaint && is_comaint)
+                        });
+                    }
+                    perms
+                }
+            };
+            if g.json {
+                let arr: Vec<Value> = perms.iter().map(permission_json).collect();
+                print!("{}", json::to_string(&Value::Array(arr), color));
+            } else {
+                render::permissions(&perms, color);
+            }
+        }
+
+        Command::Adoptable { by, reverse, limit } => {
+            let mut rows = adoptable_rows(&client).await?;
+            let total = finish_river(&mut rows, *by, *reverse, *limit);
+            if g.json {
+                print!(
+                    "{}",
+                    json::to_string(&river_json(&rows, Some("pauseid")), color)
+                );
+            } else {
+                render::river(&rows, Some("pause id"), color);
+                count_line(rows.len(), total, "adoptable distributions");
+            }
+        }
 
         Command::Search {
             r#type,
@@ -600,6 +732,9 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
         Command::River { .. } => {
             anyhow::bail!("--raw does not apply to `river` subcommands; they make several requests")
         }
+        Command::Adoptable { .. } => {
+            anyhow::bail!("--raw does not apply to `adoptable`; it makes multiple requests")
+        }
 
         // `download` makes two requests: the download_url lookup, then a GET of
         // the tarball it resolves to. Show both.
@@ -646,6 +781,9 @@ fn run_curl(client: &Client, command: &Command) -> Result<()> {
             anyhow::bail!(
                 "--curl does not apply to `river` subcommands; they make several requests"
             )
+        }
+        Command::Adoptable { .. } => {
+            anyhow::bail!("--curl does not apply to `adoptable`; it makes multiple requests")
         }
         _ => {}
     }
@@ -720,6 +858,25 @@ fn request_url(client: &Client, command: &Command) -> Result<Url> {
 
         Command::Mirrors => client.url("mirror")?,
 
+        Command::Permissions { action } => match action {
+            PermissionsAction::Module { modules } => match modules.as_slice() {
+                [only] => client.url(&format!("permission/{only}"))?,
+                many => {
+                    let mut url = client.url("permission/by_module")?;
+                    {
+                        let mut pairs = url.query_pairs_mut();
+                        for module in many {
+                            pairs.append_pair("module", module);
+                        }
+                    }
+                    url
+                }
+            },
+            PermissionsAction::Author { pauseid, .. } => {
+                client.url(&format!("permission/by_author/{}", pauseid.to_uppercase()))?
+            }
+        },
+
         Command::Search {
             r#type,
             query,
@@ -740,7 +897,7 @@ fn request_url(client: &Client, command: &Command) -> Result<Url> {
             url
         }
 
-        Command::Cache { .. } | Command::River { .. } => {
+        Command::Cache { .. } | Command::River { .. } | Command::Adoptable { .. } => {
             unreachable!("--raw / --curl reject these subcommands before this point")
         }
     };
@@ -871,62 +1028,74 @@ async fn get_query(client: &Client, path: &str, query: &[(&str, String)]) -> Res
 }
 
 /// The direct reverse dependencies of `distribution` — each with the author of
-/// its most recent production release and its CPAN River figures — ordered by
-/// [`sort_river`].
-async fn river_distribution(
-    client: &Client,
-    distribution: &str,
-    by: RiverSort,
-    reverse: bool,
-) -> Result<Vec<render::RiverRow>> {
+/// its most recent production release and its CPAN River figures. Unordered;
+/// the caller runs them through [`finish_river`].
+async fn river_distribution(client: &Client, distribution: &str) -> Result<Vec<render::RiverRow>> {
     let mut rows = reverse_dependency_rows(client, distribution).await?;
     fill_river(client, &mut rows).await?;
-    sort_river(&mut rows, by, reverse);
     Ok(rows)
 }
 
 /// The distributions whose current (latest, non-dev) release is by `pauseid`,
-/// with their CPAN River figures, ordered by [`sort_river`].
-async fn river_author(
-    client: &Client,
-    pauseid: &str,
-    by: RiverSort,
-    reverse: bool,
-) -> Result<Vec<render::RiverRow>> {
+/// with their CPAN River figures. Unordered; the caller runs them through
+/// [`finish_river`].
+async fn river_author(client: &Client, pauseid: &str) -> Result<Vec<render::RiverRow>> {
     let mut rows = author_release_rows(client, pauseid).await?;
     fill_river(client, &mut rows).await?;
-    sort_river(&mut rows, by, reverse);
     Ok(rows)
 }
 
-/// Order river rows by the `by` figure, descending unless `reverse`. A missing
-/// figure counts as 0; name breaks ties, and `reverse` flips the whole
-/// ordering so it is the exact inverse of the default.
-fn sort_river(rows: &mut [render::RiverRow], by: RiverSort, reverse: bool) {
+/// Sort river rows by the `by` figure descending (a missing figure counts as
+/// 0, name breaks ties), keep the top `limit`, then — for `reverse` — flip the
+/// kept rows for display. So `--reverse --limit N` still shows the top N, just
+/// smallest-first. Returns the row count before `limit`.
+fn finish_river(
+    rows: &mut Vec<render::RiverRow>,
+    by: RiverSort,
+    reverse: bool,
+    limit: Option<usize>,
+) -> usize {
     let key = |r: &render::RiverRow| match by {
         RiverSort::Total => r.total.unwrap_or(0),
         RiverSort::Immediate => r.immediate.unwrap_or(0),
     };
     rows.sort_by(|a, b| {
-        let ord = key(b)
+        key(b)
             .cmp(&key(a))
-            .then_with(|| a.distribution.cmp(&b.distribution));
-        if reverse { ord.reverse() } else { ord }
+            .then_with(|| a.distribution.cmp(&b.distribution))
     });
+    let total = rows.len();
+    if let Some(n) = limit {
+        rows.truncate(n);
+    }
+    if reverse {
+        rows.reverse();
+    }
+    total
 }
 
-/// `[{ "distribution", ["author",] "river": { total, immediate, bucket } }]`
-/// for `--json`. The `author` key is included only when meaningful (it varies
-/// per row for `river distribution`; for `river author` every row is the same
-/// queried author, so it is left out).
-fn river_json(rows: &[render::RiverRow], include_author: bool) -> Value {
+/// The trailing count line: `N <noun>`, or `showing X of N <noun>` when
+/// `--limit` trimmed the list.
+fn count_line(shown: usize, total: usize, noun: &str) {
+    if shown < total {
+        println!("showing {shown} of {total} {noun}");
+    } else {
+        println!("{total} {noun}");
+    }
+}
+
+/// `[{ "distribution", [<label_key>,] "river": { total, immediate, bucket } }]`
+/// for `--json`. `label_key` names the optional label field — `"author"` for
+/// `river distribution`, `"pauseid"` for `adoptable` — and is omitted for
+/// `river author`, where every row is the same queried author.
+fn river_json(rows: &[render::RiverRow], label_key: Option<&str>) -> Value {
     let arr = rows
         .iter()
         .map(|r| {
             let mut obj = serde_json::Map::new();
             obj.insert("distribution".into(), json!(r.distribution));
-            if include_author {
-                obj.insert("author".into(), json!(r.author));
+            if let Some(key) = label_key {
+                obj.insert(key.to_owned(), json!(r.label));
             }
             obj.insert(
                 "river".into(),
@@ -936,6 +1105,17 @@ fn river_json(rows: &[render::RiverRow], include_author: bool) -> Value {
         })
         .collect();
     Value::Array(arr)
+}
+
+/// `{ "module_name", "owner", "co_maintainers": [...] }` for `--json`. The
+/// crate's [`Permission`] is deserialize-only, so its fields are rebuilt by
+/// hand.
+fn permission_json(p: &Permission) -> Value {
+    json!({
+        "module_name": p.module_name,
+        "owner": p.owner,
+        "co_maintainers": p.co_maintainers,
+    })
 }
 
 /// Page the `release` index for `pauseid`'s current (latest, non-dev) releases
@@ -976,7 +1156,7 @@ async fn author_release_rows(client: &Client, pauseid: &str) -> Result<Vec<rende
             if seen.insert(dist.to_owned()) {
                 rows.push(render::RiverRow {
                     distribution: dist.to_owned(),
-                    author: None,
+                    label: None,
                     total: None,
                     immediate: None,
                     bucket: None,
@@ -1033,7 +1213,7 @@ async fn reverse_dependency_rows(
             if seen.insert(name.to_owned()) {
                 rows.push(render::RiverRow {
                     distribution: name.to_owned(),
-                    author: item
+                    label: item
                         .get("author")
                         .and_then(Value::as_str)
                         .map(str::to_owned),
@@ -1077,8 +1257,7 @@ async fn fill_river(client: &Client, rows: &mut [render::RiverRow]) -> Result<()
             "size": chunk.len(),
             "_source": ["name", "river"],
         });
-        let v: Value = client
-            .post_json("distribution/_search", &body)
+        let v = post_json_retry(client, "distribution/_search", &body)
             .await
             .context("searching distribution river data")?;
         let empty = Vec::new();
@@ -1101,6 +1280,110 @@ async fn fill_river(client: &Client, rows: &mut [render::RiverRow]) -> Result<()
         }
     }
     Ok(())
+}
+
+/// `POST {path}` with a JSON body, parsed as `Value`, retrying briefly on a
+/// `5xx` — the `_search` endpoints return one intermittently under load.
+async fn post_json_retry(client: &Client, path: &str, body: &Value) -> Result<Value> {
+    for attempt in 1..=3u32 {
+        match client.post_json::<Value, Value>(path, body).await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < 3 && e.status().is_some_and(|s| s >= 500) => {
+                let backoff = std::time::Duration::from_millis(u64::from(attempt) * 400);
+                tokio::time::sleep(backoff).await;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    unreachable!("the final attempt returns Ok or Err")
+}
+
+/// Rows for `adoptable`: every distribution with a current release providing a
+/// module namespace that ADOPTME or HANDOFF owns or co-maintains, with River
+/// figures filled in and the label set to which of the two (or both) applies.
+/// Unordered.
+async fn adoptable_rows(client: &Client) -> Result<Vec<render::RiverRow>> {
+    use std::collections::BTreeMap;
+
+    // 1. namespace -> (has ADOPTME perm, has HANDOFF perm)
+    let mut namespaces: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for (who, adoptme) in [("ADOPTME", true), ("HANDOFF", false)] {
+        let perms = client
+            .permissions_by_author(who)
+            .await
+            .with_context(|| format!("fetching {who} permissions"))?;
+        for module in perms.into_iter().filter_map(|p| p.module_name) {
+            let flags = namespaces.entry(module).or_default();
+            if adoptme {
+                flags.0 = true;
+            } else {
+                flags.1 = true;
+            }
+        }
+    }
+    let module_names: Vec<&str> = namespaces.keys().map(String::as_str).collect();
+
+    // 2. Resolve namespaces to the distribution that currently provides them
+    //    (authorized file in the latest release), carrying the flags across.
+    let mut dists: BTreeMap<String, (bool, bool)> = BTreeMap::new();
+    for chunk in module_names.chunks(250) {
+        let body = json!({
+            "query": { "bool": { "filter": [
+                { "terms": { "module.name": chunk } },
+                { "term": { "authorized": true } },
+                { "term": { "status": "latest" } },
+            ]}},
+            "size": chunk.len() * 3,
+            "_source": ["distribution", "module.name"],
+        });
+        let v = post_json_retry(client, "file/_search", &body)
+            .await
+            .context("resolving namespaces to distributions")?;
+        let empty = Vec::new();
+        let hits = v
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        for hit in hits {
+            let Some(dist) = hit.pointer("/_source/distribution").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(mods) = hit.pointer("/_source/module").and_then(Value::as_array) else {
+                continue;
+            };
+            for m in mods {
+                if let Some(name) = m.get("name").and_then(Value::as_str)
+                    && let Some(&(adoptme, handoff)) = namespaces.get(name)
+                {
+                    let flags = dists.entry(dist.to_owned()).or_insert((false, false));
+                    flags.0 |= adoptme;
+                    flags.1 |= handoff;
+                }
+            }
+        }
+    }
+
+    // 3. River figures.
+    let mut rows: Vec<render::RiverRow> = dists
+        .into_iter()
+        .map(|(distribution, (adoptme, handoff))| {
+            let label = match (adoptme, handoff) {
+                (true, true) => "ADOPTME,HANDOFF",
+                (true, false) => "ADOPTME",
+                (false, true) => "HANDOFF",
+                (false, false) => "-",
+            };
+            render::RiverRow {
+                distribution,
+                label: Some(label.to_owned()),
+                total: None,
+                immediate: None,
+                bucket: None,
+            }
+        })
+        .collect();
+    fill_river(client, &mut rows).await?;
+    Ok(rows)
 }
 
 /// Some endpoints wrap their payload in a single-key envelope (`release`,

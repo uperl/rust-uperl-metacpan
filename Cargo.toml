@@ -1,6 +1,6 @@
 [package]
 name = "uperl-metacpan"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Command line interface to the MetaCPAN API"
 repository = "https://github.com/uperl/uperl-metacpan"
@@ -12,10 +12,10 @@ clap = { version = "4", features = ["derive"] }
 comfy-table = "7"
 dirs = "6"
 hex = "0.4"
-metacpan-api-modern = { git = "https://github.com/uperl/rust-metacpan-api-modern", tag = "v0.1.1" }
+metacpan-api-modern = { git = "https://github.com/uperl/rust-metacpan-api-modern", tag = "v0.3.0" }
 serde_json = "1"
 sha2 = "0.10"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

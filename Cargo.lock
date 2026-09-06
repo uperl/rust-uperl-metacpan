@@ -689,8 +689,8 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "metacpan-api-modern"
-version = "0.1.1"
-source = "git+https://github.com/uperl/rust-metacpan-api-modern?tag=v0.1.1#5adfed5b7f2c61200b61fde07f0dbdd4b8fe3ee1"
+version = "0.3.0"
+source = "git+https://github.com/uperl/rust-metacpan-api-modern?tag=v0.3.0#fcf7fa75b7844e51ba22e5152210bdf6dc756d5c"
 dependencies = [
  "reqwest",
  "serde",
