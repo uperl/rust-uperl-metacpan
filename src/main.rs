@@ -318,7 +318,14 @@ enum Command {
     /// Reads both authors' permissions, resolves the namespaces to the
     /// distributions that currently provide them, and looks up River figures,
     /// so it makes many requests.
-    Adoptable,
+    Adoptable {
+        /// Which CPAN River figure to sort on.
+        #[arg(long, value_enum, default_value = "total")]
+        by: RiverSort,
+        /// Sort ascending (smallest first) instead of descending.
+        #[arg(long)]
+        reverse: bool,
+    },
 
     /// Search a document type with a Lucene query string.
     Search {
@@ -635,15 +642,9 @@ async fn main() -> Result<()> {
             }
         }
 
-        Command::Adoptable => {
+        Command::Adoptable { by, reverse } => {
             let mut rows = adoptable_rows(&client).await?;
-            rows.sort_by(|a, b| {
-                b.total
-                    .unwrap_or(0)
-                    .cmp(&a.total.unwrap_or(0))
-                    .then(b.immediate.unwrap_or(0).cmp(&a.immediate.unwrap_or(0)))
-                    .then_with(|| a.distribution.cmp(&b.distribution))
-            });
+            sort_river(&mut rows, *by, *reverse);
             if g.json {
                 print!("{}", json::to_string(&river_json(&rows, false), color));
             } else {
@@ -711,7 +712,7 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
         Command::River { .. } => {
             anyhow::bail!("--raw does not apply to `river` subcommands; they make several requests")
         }
-        Command::Adoptable => {
+        Command::Adoptable { .. } => {
             anyhow::bail!("--raw does not apply to `adoptable`; it makes many requests")
         }
 
@@ -761,7 +762,7 @@ fn run_curl(client: &Client, command: &Command) -> Result<()> {
                 "--curl does not apply to `river` subcommands; they make several requests"
             )
         }
-        Command::Adoptable => {
+        Command::Adoptable { .. } => {
             anyhow::bail!("--curl does not apply to `adoptable`; it makes many requests")
         }
         _ => {}
@@ -876,7 +877,7 @@ fn request_url(client: &Client, command: &Command) -> Result<Url> {
             url
         }
 
-        Command::Cache { .. } | Command::River { .. } | Command::Adoptable => {
+        Command::Cache { .. } | Command::River { .. } | Command::Adoptable { .. } => {
             unreachable!("--raw / --curl reject these subcommands before this point")
         }
     };

@@ -37,7 +37,7 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
 | `river author <PAUSEID> [--by total\|immediate] [--reverse]` | the distributions whose current (latest, non-dev) release is by that author, ordered by CPAN River total |
 | `permissions module <MODULE>...` | PAUSE upload permissions (`06perms`) for one or more module namespaces |
 | `permissions author <PAUSEID> [--owner] [--comaint]` | every module namespace a PAUSE id owns or co-maintains |
-| `adoptable` | distributions up for adoption (ADOPTME / HANDOFF permissions), with River figures, most-depended-on first |
+| `adoptable [--by total\|immediate] [--reverse]` | distributions up for adoption (ADOPTME / HANDOFF permissions), with River figures, most-depended-on first |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
 | `cache path` | print the cache directory |
 | `cache status` | show the cache location, entry count, and disk space used (actual blocks allocated, like `du`) |
@@ -113,10 +113,11 @@ it co-maintains; passing both is the same as passing neither.
 
 `adoptable` lists every distribution up for adoption — one with a current
 release providing a namespace that the `ADOPTME` or `HANDOFF` pseudo-users own
-or co-maintain — with its CPAN River `total` and `immediate`, ordered by
-`total` then `immediate`, largest first. It reads both authors' permissions,
-resolves each namespace to the distribution that currently provides it, and
-looks up River figures, so it makes many requests (all cached).
+or co-maintain — with its CPAN River `total` and `immediate`, largest `total`
+first. It takes the same `--by total|immediate` and `--reverse` options as the
+`river` subcommands. It reads both authors' permissions, resolves each
+namespace to the distribution that currently provides it, and looks up River
+figures, so it makes many requests (all cached).
 
 ### Examples
 
