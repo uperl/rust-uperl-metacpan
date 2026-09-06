@@ -140,7 +140,7 @@ enum RiverAction {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
-        /// Print only the first N rows after sorting.
+        /// Print only the top N rows (with --reverse, the top N shown smallest-first).
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
     },
@@ -160,7 +160,7 @@ enum RiverAction {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
-        /// Print only the first N rows after sorting.
+        /// Print only the top N rows (with --reverse, the top N shown smallest-first).
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
     },
@@ -331,7 +331,7 @@ enum Command {
         /// Sort ascending (smallest first) instead of descending.
         #[arg(long)]
         reverse: bool,
-        /// Print only the first N rows after sorting.
+        /// Print only the top N rows (with --reverse, the top N shown smallest-first).
         #[arg(long, value_name = "N")]
         limit: Option<usize>,
     },
@@ -575,8 +575,8 @@ async fn main() -> Result<()> {
                 reverse,
                 limit,
             } => {
-                let mut rows = river_distribution(&client, distribution, *by, *reverse).await?;
-                let total = apply_limit(&mut rows, *limit);
+                let mut rows = river_distribution(&client, distribution).await?;
+                let total = finish_river(&mut rows, *by, *reverse, *limit);
                 if g.json {
                     print!("{}", json::to_string(&river_json(&rows, true), color));
                 } else {
@@ -591,8 +591,8 @@ async fn main() -> Result<()> {
                 reverse,
                 limit,
             } => {
-                let mut rows = river_author(&client, pauseid, *by, *reverse).await?;
-                let total = apply_limit(&mut rows, *limit);
+                let mut rows = river_author(&client, pauseid).await?;
+                let total = finish_river(&mut rows, *by, *reverse, *limit);
                 if g.json {
                     print!("{}", json::to_string(&river_json(&rows, false), color));
                 } else {
@@ -658,8 +658,7 @@ async fn main() -> Result<()> {
 
         Command::Adoptable { by, reverse, limit } => {
             let mut rows = adoptable_rows(&client).await?;
-            sort_river(&mut rows, *by, *reverse);
-            let total = apply_limit(&mut rows, *limit);
+            let total = finish_river(&mut rows, *by, *reverse, *limit);
             if g.json {
                 print!("{}", json::to_string(&river_json(&rows, false), color));
             } else {
@@ -1023,56 +1022,48 @@ async fn get_query(client: &Client, path: &str, query: &[(&str, String)]) -> Res
 }
 
 /// The direct reverse dependencies of `distribution` — each with the author of
-/// its most recent production release and its CPAN River figures — ordered by
-/// [`sort_river`].
-async fn river_distribution(
-    client: &Client,
-    distribution: &str,
-    by: RiverSort,
-    reverse: bool,
-) -> Result<Vec<render::RiverRow>> {
+/// its most recent production release and its CPAN River figures. Unordered;
+/// the caller runs them through [`finish_river`].
+async fn river_distribution(client: &Client, distribution: &str) -> Result<Vec<render::RiverRow>> {
     let mut rows = reverse_dependency_rows(client, distribution).await?;
     fill_river(client, &mut rows).await?;
-    sort_river(&mut rows, by, reverse);
     Ok(rows)
 }
 
 /// The distributions whose current (latest, non-dev) release is by `pauseid`,
-/// with their CPAN River figures, ordered by [`sort_river`].
-async fn river_author(
-    client: &Client,
-    pauseid: &str,
-    by: RiverSort,
-    reverse: bool,
-) -> Result<Vec<render::RiverRow>> {
+/// with their CPAN River figures. Unordered; the caller runs them through
+/// [`finish_river`].
+async fn river_author(client: &Client, pauseid: &str) -> Result<Vec<render::RiverRow>> {
     let mut rows = author_release_rows(client, pauseid).await?;
     fill_river(client, &mut rows).await?;
-    sort_river(&mut rows, by, reverse);
     Ok(rows)
 }
 
-/// Order river rows by the `by` figure, descending unless `reverse`. A missing
-/// figure counts as 0; name breaks ties, and `reverse` flips the whole
-/// ordering so it is the exact inverse of the default.
-fn sort_river(rows: &mut [render::RiverRow], by: RiverSort, reverse: bool) {
+/// Sort river rows by the `by` figure descending (a missing figure counts as
+/// 0, name breaks ties), keep the top `limit`, then — for `reverse` — flip the
+/// kept rows for display. So `--reverse --limit N` still shows the top N, just
+/// smallest-first. Returns the row count before `limit`.
+fn finish_river(
+    rows: &mut Vec<render::RiverRow>,
+    by: RiverSort,
+    reverse: bool,
+    limit: Option<usize>,
+) -> usize {
     let key = |r: &render::RiverRow| match by {
         RiverSort::Total => r.total.unwrap_or(0),
         RiverSort::Immediate => r.immediate.unwrap_or(0),
     };
     rows.sort_by(|a, b| {
-        let ord = key(b)
+        key(b)
             .cmp(&key(a))
-            .then_with(|| a.distribution.cmp(&b.distribution));
-        if reverse { ord.reverse() } else { ord }
+            .then_with(|| a.distribution.cmp(&b.distribution))
     });
-}
-
-/// Apply `--limit` in place, keeping the first `n` rows, and return the count
-/// before truncation (for the "showing X of N" summary).
-fn apply_limit(rows: &mut Vec<render::RiverRow>, limit: Option<usize>) -> usize {
     let total = rows.len();
     if let Some(n) = limit {
         rows.truncate(n);
+    }
+    if reverse {
+        rows.reverse();
     }
     total
 }

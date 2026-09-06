@@ -83,9 +83,10 @@ Check how much space it uses with `uperl-metacpan cache status`, clear it with
 
 `river distribution <DIST>` lists the distributions whose latest release
 depends directly on `<DIST>`, ordered by their CPAN River total (transitive
-downstream count), largest first. Pass `--by immediate` to sort on the direct
-dependent count instead, `--reverse` to sort smallest first, and `--limit N` to
-print only the top N rows. Each row also
+downstream count), largest first. Pass `--by immediate` to rank on the direct
+dependent count instead, `--limit N` to keep only the top N, and `--reverse` to
+show that list smallest-first (with `--limit`, still the top N — just flipped).
+Each row also
 shows the `author` (PAUSE id) of that distribution's most recent production
 release. It pages through the reverse-dependency list and then looks up the
 River figures for those distributions, so it makes several requests; every
