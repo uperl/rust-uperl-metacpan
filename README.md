@@ -51,9 +51,10 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
   for each request the command makes: the request line and headers, a blank
   line, the response status line and headers, a blank line, then the body
   verbatim. The cache is bypassed, and `download` prints both the
-  `download_url` lookup and the tarball fetch without writing a file. Does not
-  apply to `cache` subcommands.
-- `--curl` — print the equivalent `curl` command line and make no request.
+  `download_url` lookup and the tarball fetch without writing a file. The
+  exchange is printed even on failure, but a `4xx`/`5xx` response still exits
+  non-zero. Does not apply to `cache` subcommands.
+- `--curl` — print an equivalent `curl` command line and make no request.
   `download` and `download-url` print the `download_url` lookup; the tarball URL
   it resolves to is only known once that request runs. Does not apply to
   `cache` subcommands, and cannot be combined with `--raw`.
