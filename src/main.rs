@@ -665,10 +665,10 @@ async fn main() -> Result<()> {
             if g.json {
                 print!(
                     "{}",
-                    json::to_string(&river_json(&rows, Some("handoff")), color)
+                    json::to_string(&river_json(&rows, Some("pauseid")), color)
                 );
             } else {
-                render::river(&rows, Some("handoff"), color);
+                render::river(&rows, Some("pause id"), color);
                 count_line(rows.len(), total, "adoptable distributions");
             }
         }
@@ -1086,7 +1086,7 @@ fn count_line(shown: usize, total: usize, noun: &str) {
 
 /// `[{ "distribution", [<label_key>,] "river": { total, immediate, bucket } }]`
 /// for `--json`. `label_key` names the optional label field — `"author"` for
-/// `river distribution`, `"handoff"` for `adoptable` — and is omitted for
+/// `river distribution`, `"pauseid"` for `adoptable` — and is omitted for
 /// `river author`, where every row is the same queried author.
 fn river_json(rows: &[render::RiverRow], label_key: Option<&str>) -> Value {
     let arr = rows
