@@ -307,9 +307,9 @@ pub fn mirrors(value: Value, color: bool) -> Result<()> {
     Ok(())
 }
 
-/// One row of `river distribution` output: a reverse-dependency distribution,
-/// the author of its most recent production release, and its CPAN River
-/// figures. Every optional field is `None` when the API had no value for it.
+/// One row of `river` output: a distribution, optionally the author of its
+/// most recent production release, and its CPAN River figures. Every optional
+/// field is `None` when the API had no value for it.
 pub struct RiverRow {
     pub distribution: String,
     pub author: Option<String>,
@@ -318,31 +318,29 @@ pub struct RiverRow {
     pub bucket: Option<u64>,
 }
 
-/// Print the reverse-dependency table for `river distribution`, in the order
-/// given.
-pub fn river(rows: &[RiverRow], color: bool) {
+/// Print the `river` table, in the order given. `show_author` adds the
+/// `author` column (`river distribution`); `river author` omits it since every
+/// row is the same queried author. The caller prints its own summary line.
+pub fn river(rows: &[RiverRow], show_author: bool, color: bool) {
+    let mut cols = vec!["distribution"];
+    if show_author {
+        cols.push("author");
+    }
+    cols.extend(["river total", "river immediate", "bucket"]);
+
     let mut t = table();
-    t.set_header(header(
-        [
-            "distribution",
-            "author",
-            "river total",
-            "river immediate",
-            "bucket",
-        ],
-        color,
-    ));
+    t.set_header(header(cols, color));
     for r in rows {
-        t.add_row(vec![
-            Cell::new(&r.distribution),
-            Cell::new(r.author.as_deref().unwrap_or("-")),
-            Cell::new(opt_num(r.total)),
-            Cell::new(opt_num(r.immediate)),
-            Cell::new(opt_num(r.bucket)),
-        ]);
+        let mut cells = vec![Cell::new(&r.distribution)];
+        if show_author {
+            cells.push(Cell::new(r.author.as_deref().unwrap_or("-")));
+        }
+        cells.push(Cell::new(opt_num(r.total)));
+        cells.push(Cell::new(opt_num(r.immediate)));
+        cells.push(Cell::new(opt_num(r.bucket)));
+        t.add_row(cells);
     }
     println!("{t}");
-    println!("{} direct reverse dependencies", rows.len());
 }
 
 /// A count for a table cell, or `-` when the API had no number for it.

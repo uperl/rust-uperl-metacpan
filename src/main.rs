@@ -141,6 +141,23 @@ enum RiverAction {
         #[arg(long)]
         reverse: bool,
     },
+
+    /// List the distributions whose current (latest, non-dev) release is by an
+    /// author, ordered by a CPAN River figure (transitive `total` by default),
+    /// highest first.
+    ///
+    /// Pages through the author's latest releases and then looks up the River
+    /// figures for those distributions, so it makes several requests.
+    Author {
+        /// PAUSE id, e.g. PLICEASE (case-insensitive).
+        pauseid: String,
+        /// Which CPAN River figure to sort on.
+        #[arg(long, value_enum, default_value = "total")]
+        by: RiverSort,
+        /// Sort ascending (smallest first) instead of descending.
+        #[arg(long)]
+        reverse: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -252,7 +269,8 @@ enum Command {
         action: CacheAction,
     },
 
-    /// CPAN River (reverse-dependency) queries.
+    /// CPAN River queries: reverse dependencies of a distribution, or the
+    /// distributions currently released by an author.
     River {
         #[command(subcommand)]
         action: RiverAction,
@@ -498,23 +516,27 @@ async fn main() -> Result<()> {
             } => {
                 let rows = river_distribution(&client, distribution, *by, *reverse).await?;
                 if g.json {
-                    let arr: Vec<Value> = rows
-                        .iter()
-                        .map(|r| {
-                            json!({
-                                "distribution": r.distribution,
-                                "author": r.author,
-                                "river": {
-                                    "total": r.total,
-                                    "immediate": r.immediate,
-                                    "bucket": r.bucket,
-                                },
-                            })
-                        })
-                        .collect();
-                    print!("{}", json::to_string(&Value::Array(arr), color));
+                    print!("{}", json::to_string(&river_json(&rows, true), color));
                 } else {
-                    render::river(&rows, color);
+                    render::river(&rows, true, color);
+                    println!("{} direct reverse dependencies", rows.len());
+                }
+            }
+
+            RiverAction::Author {
+                pauseid,
+                by,
+                reverse,
+            } => {
+                let rows = river_author(&client, pauseid, *by, *reverse).await?;
+                if g.json {
+                    print!("{}", json::to_string(&river_json(&rows, false), color));
+                } else {
+                    render::river(&rows, false, color);
+                    println!(
+                        "{} distributions with a current release by {pauseid}",
+                        rows.len()
+                    );
                 }
             }
         },
@@ -850,8 +872,7 @@ async fn get_query(client: &Client, path: &str, query: &[(&str, String)]) -> Res
 
 /// The direct reverse dependencies of `distribution` — each with the author of
 /// its most recent production release and its CPAN River figures — ordered by
-/// the `by` figure, descending unless `reverse`. A missing figure counts as 0;
-/// name breaks ties, and `reverse` flips the whole ordering.
+/// [`sort_river`].
 async fn river_distribution(
     client: &Client,
     distribution: &str,
@@ -860,6 +881,28 @@ async fn river_distribution(
 ) -> Result<Vec<render::RiverRow>> {
     let mut rows = reverse_dependency_rows(client, distribution).await?;
     fill_river(client, &mut rows).await?;
+    sort_river(&mut rows, by, reverse);
+    Ok(rows)
+}
+
+/// The distributions whose current (latest, non-dev) release is by `pauseid`,
+/// with their CPAN River figures, ordered by [`sort_river`].
+async fn river_author(
+    client: &Client,
+    pauseid: &str,
+    by: RiverSort,
+    reverse: bool,
+) -> Result<Vec<render::RiverRow>> {
+    let mut rows = author_release_rows(client, pauseid).await?;
+    fill_river(client, &mut rows).await?;
+    sort_river(&mut rows, by, reverse);
+    Ok(rows)
+}
+
+/// Order river rows by the `by` figure, descending unless `reverse`. A missing
+/// figure counts as 0; name breaks ties, and `reverse` flips the whole
+/// ordering so it is the exact inverse of the default.
+fn sort_river(rows: &mut [render::RiverRow], by: RiverSort, reverse: bool) {
     let key = |r: &render::RiverRow| match by {
         RiverSort::Total => r.total.unwrap_or(0),
         RiverSort::Immediate => r.immediate.unwrap_or(0),
@@ -870,6 +913,89 @@ async fn river_distribution(
             .then_with(|| a.distribution.cmp(&b.distribution));
         if reverse { ord.reverse() } else { ord }
     });
+}
+
+/// `[{ "distribution", ["author",] "river": { total, immediate, bucket } }]`
+/// for `--json`. The `author` key is included only when meaningful (it varies
+/// per row for `river distribution`; for `river author` every row is the same
+/// queried author, so it is left out).
+fn river_json(rows: &[render::RiverRow], include_author: bool) -> Value {
+    let arr = rows
+        .iter()
+        .map(|r| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("distribution".into(), json!(r.distribution));
+            if include_author {
+                obj.insert("author".into(), json!(r.author));
+            }
+            obj.insert(
+                "river".into(),
+                json!({ "total": r.total, "immediate": r.immediate, "bucket": r.bucket }),
+            );
+            Value::Object(obj)
+        })
+        .collect();
+    Value::Array(arr)
+}
+
+/// Page the `release` index for `pauseid`'s current (latest, non-dev) releases
+/// and return one river row per distribution (river figures filled in later).
+async fn author_release_rows(client: &Client, pauseid: &str) -> Result<Vec<render::RiverRow>> {
+    const PAGE: usize = 500;
+    let author = pauseid.to_uppercase();
+    let mut rows: Vec<render::RiverRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut from = 0usize;
+    loop {
+        let body = json!({
+            "query": { "bool": { "must": [
+                { "term": { "author": author } },
+                { "term": { "status": "latest" } },
+            ]}},
+            "size": PAGE,
+            "from": from,
+            "_source": ["distribution"],
+            "sort": ["distribution"],
+        });
+        let v: Value = client
+            .post_json("release/_search", &body)
+            .await
+            .context("searching author releases")?;
+        let empty = Vec::new();
+        let hits = v
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        if hits.is_empty() {
+            break;
+        }
+        for hit in hits {
+            let Some(dist) = hit.pointer("/_source/distribution").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen.insert(dist.to_owned()) {
+                rows.push(render::RiverRow {
+                    distribution: dist.to_owned(),
+                    author: None,
+                    total: None,
+                    immediate: None,
+                    bucket: None,
+                });
+            }
+        }
+        from += hits.len();
+        let total = v
+            .pointer("/hits/total/value")
+            .or_else(|| v.pointer("/hits/total"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if from as u64 >= total {
+            break;
+        }
+        if from > 100_000 {
+            anyhow::bail!("release search pagination for {author} did not terminate");
+        }
+    }
     Ok(rows)
 }
 
