@@ -10,7 +10,7 @@ use std::io::IsTerminal;
 use anyhow::{Context, Result};
 use comfy_table::{Attribute, Cell, ContentArrangement, Table, presets::UTF8_FULL};
 use metacpan_api_modern::types::{
-    Author, Changes, Distribution, DownloadUrl, File, Mirror, Release,
+    Author, Changes, Distribution, DownloadUrl, File, Mirror, Permission, Release,
 };
 use serde_json::Value;
 
@@ -346,6 +346,28 @@ pub fn river(rows: &[RiverRow], show_author: bool, color: bool) {
 /// A count for a table cell, or `-` when the API had no number for it.
 fn opt_num(n: Option<u64>) -> String {
     n.map_or_else(|| "-".to_string(), |n| n.to_string())
+}
+
+/// Print a `module / owner / co-maintainers` table for `permissions`.
+pub fn permissions(perms: &[Permission], color: bool) {
+    let mut t = table();
+    t.set_header(header(["module", "owner", "co-maintainers"], color));
+    for p in perms {
+        let co = if p.co_maintainers.is_empty() {
+            "-".to_string()
+        } else {
+            p.co_maintainers.join(", ")
+        };
+        t.add_row(vec![
+            Cell::new(p.module_name.as_deref().unwrap_or("-")),
+            Cell::new(p.owner.as_deref().unwrap_or("-")),
+            Cell::new(co),
+        ]);
+    }
+    println!("{t}");
+    if perms.len() != 1 {
+        println!("{} modules", perms.len());
+    }
 }
 
 pub fn search(value: Value, type_: &str, color: bool) -> Result<()> {

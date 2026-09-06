@@ -35,6 +35,8 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
 | `mirrors` | known CPAN mirrors |
 | `river distribution <DIST> [--by total\|immediate] [--reverse]` | the distribution's direct reverse dependencies (with each one's latest-release author), ordered by CPAN River total |
 | `river author <PAUSEID> [--by total\|immediate] [--reverse]` | the distributions whose current (latest, non-dev) release is by that author, ordered by CPAN River total |
+| `permissions module <MODULE>...` | PAUSE upload permissions (`06perms`) for one or more module namespaces |
+| `permissions author <PAUSEID> [--owner] [--comaint]` | every module namespace a PAUSE id owns or co-maintains |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
 | `cache path` | print the cache directory |
 | `cache status` | show the cache location, entry count, and disk space used (actual blocks allocated, like `du`) |
@@ -97,6 +99,17 @@ distributions sit highest up the river. It takes the same `--by` and
 `--reverse` options; the `author` column is omitted since every row is the
 queried author.
 
+### Permissions
+
+`permissions module <MODULE>...` shows the PAUSE `06perms` entry — primary
+`owner` and `co-maintainers` — for each namespace. One module is a direct
+lookup (a namespace with no entry is an error); two or more are fetched in a
+single `by_module` request and unknown namespaces are simply omitted.
+
+`permissions author <PAUSEID>` lists every namespace that id owns or
+co-maintains. `--owner` keeps only the ones it owns, `--comaint` only the ones
+it co-maintains; passing both is the same as passing neither.
+
 ### Examples
 
 ```sh
@@ -110,6 +123,8 @@ uperl-metacpan download FFI::Platypus --version "== 2.08"
 uperl-metacpan --json mirrors | jq '.[].name'
 uperl-metacpan river distribution Try-Tiny
 uperl-metacpan river author PLICEASE --by immediate
+uperl-metacpan permissions module Moose Try::Tiny
+uperl-metacpan permissions author PLICEASE --json
 uperl-metacpan --raw author PLICEASE
 uperl-metacpan --curl search --type release --query "author:PLICEASE" --size 5
 uperl-metacpan cache clear

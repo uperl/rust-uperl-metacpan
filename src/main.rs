@@ -16,7 +16,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use metacpan_api_modern::reqwest::Url;
-use metacpan_api_modern::types::DownloadUrl;
+use metacpan_api_modern::types::{DownloadUrl, Permission};
 use metacpan_api_modern::{Client, PodFormat};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -161,6 +161,35 @@ enum RiverAction {
 }
 
 #[derive(Subcommand)]
+enum PermissionsAction {
+    /// PAUSE upload permissions for one or more module namespaces.
+    ///
+    /// One module is a `GET /permission/{module}` (a missing namespace is an
+    /// error); two or more use `GET /permission/by_module` in a single
+    /// request, where a namespace with no `06perms` entry is just absent.
+    Module {
+        /// Module namespace, e.g. Moose. Repeat for a batch lookup.
+        #[arg(required = true, value_name = "MODULE")]
+        modules: Vec<String>,
+    },
+
+    /// Every module namespace a PAUSE id owns or co-maintains.
+    ///
+    /// `GET /permission/by_author/{pauseid}`. `--owner` and `--comaint` filter
+    /// the result client-side; giving both is the same as giving neither.
+    Author {
+        /// PAUSE id, e.g. PLICEASE (case-insensitive).
+        pauseid: String,
+        /// Keep only namespaces where PAUSEID is the primary owner.
+        #[arg(long)]
+        owner: bool,
+        /// Keep only namespaces where PAUSEID is a co-maintainer.
+        #[arg(long)]
+        comaint: bool,
+    },
+}
+
+#[derive(Subcommand)]
 enum Command {
     /// Look up a CPAN author by PAUSE id.
     Author {
@@ -274,6 +303,12 @@ enum Command {
     River {
         #[command(subcommand)]
         action: RiverAction,
+    },
+
+    /// PAUSE upload permissions (`06perms`): who may release a module.
+    Permissions {
+        #[command(subcommand)]
+        action: PermissionsAction,
     },
 
     /// Search a document type with a Lucene query string.
@@ -541,6 +576,56 @@ async fn main() -> Result<()> {
             }
         },
 
+        Command::Permissions { action } => {
+            let perms = match action {
+                PermissionsAction::Module { modules } => match modules.as_slice() {
+                    [only] => vec![
+                        client
+                            .permission(only)
+                            .await
+                            .with_context(|| format!("fetching permissions for {only}"))?,
+                    ],
+                    many => client
+                        .permissions_by_module(many)
+                        .await
+                        .context("fetching permissions")?,
+                },
+                PermissionsAction::Author {
+                    pauseid,
+                    owner,
+                    comaint,
+                } => {
+                    // The by_author endpoint matches the PAUSE id exactly, and
+                    // PAUSE ids are upper-case.
+                    let pauseid = pauseid.to_uppercase();
+                    let mut perms = client
+                        .permissions_by_author(&pauseid)
+                        .await
+                        .with_context(|| format!("fetching permissions for {pauseid}"))?;
+                    if *owner || *comaint {
+                        perms.retain(|p| {
+                            let is_owner = p
+                                .owner
+                                .as_deref()
+                                .is_some_and(|o| o.eq_ignore_ascii_case(&pauseid));
+                            let is_comaint = p
+                                .co_maintainers
+                                .iter()
+                                .any(|c| c.eq_ignore_ascii_case(&pauseid));
+                            (*owner && is_owner) || (*comaint && is_comaint)
+                        });
+                    }
+                    perms
+                }
+            };
+            if g.json {
+                let arr: Vec<Value> = perms.iter().map(permission_json).collect();
+                print!("{}", json::to_string(&Value::Array(arr), color));
+            } else {
+                render::permissions(&perms, color);
+            }
+        }
+
         Command::Search {
             r#type,
             query,
@@ -719,6 +804,25 @@ fn request_url(client: &Client, command: &Command) -> Result<Url> {
         } => download_url_endpoint(client, module, version.as_deref(), *dev)?,
 
         Command::Mirrors => client.url("mirror")?,
+
+        Command::Permissions { action } => match action {
+            PermissionsAction::Module { modules } => match modules.as_slice() {
+                [only] => client.url(&format!("permission/{only}"))?,
+                many => {
+                    let mut url = client.url("permission/by_module")?;
+                    {
+                        let mut pairs = url.query_pairs_mut();
+                        for module in many {
+                            pairs.append_pair("module", module);
+                        }
+                    }
+                    url
+                }
+            },
+            PermissionsAction::Author { pauseid, .. } => {
+                client.url(&format!("permission/by_author/{}", pauseid.to_uppercase()))?
+            }
+        },
 
         Command::Search {
             r#type,
@@ -936,6 +1040,17 @@ fn river_json(rows: &[render::RiverRow], include_author: bool) -> Value {
         })
         .collect();
     Value::Array(arr)
+}
+
+/// `{ "module_name", "owner", "co_maintainers": [...] }` for `--json`. The
+/// crate's [`Permission`] is deserialize-only, so its fields are rebuilt by
+/// hand.
+fn permission_json(p: &Permission) -> Value {
+    json!({
+        "module_name": p.module_name,
+        "owner": p.owner,
+        "co_maintainers": p.co_maintainers,
+    })
 }
 
 /// Page the `release` index for `pauseid`'s current (latest, non-dev) releases
