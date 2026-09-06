@@ -116,16 +116,30 @@ enum CacheAction {
     Status,
 }
 
+#[derive(Copy, Clone, ValueEnum)]
+enum RiverSort {
+    /// CPAN River total: transitive downstream count.
+    Total,
+    /// CPAN River immediate: direct dependent count.
+    Immediate,
+}
+
 #[derive(Subcommand)]
 enum RiverAction {
-    /// List a distribution's direct reverse dependencies, ordered by their
-    /// CPAN River total (transitive downstream count), highest first.
+    /// List a distribution's direct reverse dependencies, ordered by a CPAN
+    /// River figure (transitive `total` by default), highest first.
     ///
     /// Pages through the reverse-dependency list and then looks up the River
     /// figures for those distributions, so it makes several requests.
     Distribution {
         /// Distribution name, e.g. Try-Tiny.
         distribution: String,
+        /// Which CPAN River figure to sort on.
+        #[arg(long, value_enum, default_value = "total")]
+        by: RiverSort,
+        /// Sort ascending (smallest first) instead of descending.
+        #[arg(long)]
+        reverse: bool,
     },
 }
 
@@ -477,8 +491,12 @@ async fn main() -> Result<()> {
         }
 
         Command::River { action } => match action {
-            RiverAction::Distribution { distribution } => {
-                let rows = river_distribution(&client, distribution).await?;
+            RiverAction::Distribution {
+                distribution,
+                by,
+                reverse,
+            } => {
+                let rows = river_distribution(&client, distribution, *by, *reverse).await?;
                 if g.json {
                     let arr: Vec<Value> = rows
                         .iter()
@@ -832,16 +850,25 @@ async fn get_query(client: &Client, path: &str, query: &[(&str, String)]) -> Res
 
 /// The direct reverse dependencies of `distribution` — each with the author of
 /// its most recent production release and its CPAN River figures — ordered by
-/// river total descending; rows with no river data sort last, then ties break
-/// by name.
-async fn river_distribution(client: &Client, distribution: &str) -> Result<Vec<render::RiverRow>> {
+/// the `by` figure, descending unless `reverse`. A missing figure counts as 0;
+/// name breaks ties, and `reverse` flips the whole ordering.
+async fn river_distribution(
+    client: &Client,
+    distribution: &str,
+    by: RiverSort,
+    reverse: bool,
+) -> Result<Vec<render::RiverRow>> {
     let mut rows = reverse_dependency_rows(client, distribution).await?;
     fill_river(client, &mut rows).await?;
+    let key = |r: &render::RiverRow| match by {
+        RiverSort::Total => r.total.unwrap_or(0),
+        RiverSort::Immediate => r.immediate.unwrap_or(0),
+    };
     rows.sort_by(|a, b| {
-        b.total
-            .unwrap_or(0)
-            .cmp(&a.total.unwrap_or(0))
-            .then_with(|| a.distribution.cmp(&b.distribution))
+        let ord = key(b)
+            .cmp(&key(a))
+            .then_with(|| a.distribution.cmp(&b.distribution));
+        if reverse { ord.reverse() } else { ord }
     });
     Ok(rows)
 }

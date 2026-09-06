@@ -33,7 +33,7 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
 | `download-url <MODULE> [--version <RANGE>] [--dev]` | the archive that satisfies a module request |
 | `download <MODULE> [--version <RANGE>] [--dev]` | download that archive into the current directory and verify its SHA-256 |
 | `mirrors` | known CPAN mirrors |
-| `river distribution <DIST>` | the distribution's direct reverse dependencies (with each one's latest-release author), ordered by CPAN River total |
+| `river distribution <DIST> [--by total\|immediate] [--reverse]` | the distribution's direct reverse dependencies (with each one's latest-release author), ordered by CPAN River total |
 | `search --type <TYPE> --query <LUCENE> [--size N] [--from N]` | a Lucene query against a document type |
 | `cache path` | print the cache directory |
 | `cache status` | show the cache location, entry count, and disk space used (actual blocks allocated, like `du`) |
@@ -78,12 +78,13 @@ Check how much space it uses with `uperl-metacpan cache status`, clear it with
 
 `river distribution <DIST>` lists the distributions whose latest release
 depends directly on `<DIST>`, ordered by their CPAN River total (transitive
-downstream count), largest first. Each row also shows the `author` (PAUSE id)
-of that distribution's most recent production release. It pages through the
-reverse-dependency list and then looks up the River figures for those
-distributions, so it makes several requests; responses are cached like any
-other GET. A distribution with no River data on MetaCPAN is still listed, with
-`-` for its figures.
+downstream count), largest first. Pass `--by immediate` to sort on the direct
+dependent count instead, and `--reverse` to sort smallest first. Each row also
+shows the `author` (PAUSE id) of that distribution's most recent production
+release. It pages through the reverse-dependency list and then looks up the
+River figures for those distributions, so it makes several requests; responses
+are cached like any other GET. A distribution with no River data on MetaCPAN is
+still listed, with `-` for its figures.
 
 MetaCPAN's `reverse_dependencies` endpoint only serves its first ~900 results;
 for a distribution with more reverse dependencies than that, the command prints
