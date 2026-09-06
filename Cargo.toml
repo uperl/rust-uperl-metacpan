@@ -1,6 +1,6 @@
 [package]
 name = "uperl-metacpan"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 description = "Command line interface to the MetaCPAN API"
 repository = "https://github.com/uperl/uperl-metacpan"
