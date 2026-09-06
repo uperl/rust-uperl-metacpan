@@ -116,6 +116,50 @@ enum CacheAction {
     Status,
 }
 
+#[derive(Copy, Clone, ValueEnum)]
+enum RiverSort {
+    /// CPAN River total: transitive downstream count.
+    Total,
+    /// CPAN River immediate: direct dependent count.
+    Immediate,
+}
+
+#[derive(Subcommand)]
+enum RiverAction {
+    /// List a distribution's direct reverse dependencies, ordered by a CPAN
+    /// River figure (transitive `total` by default), highest first.
+    ///
+    /// Pages through the reverse-dependency list and then looks up the River
+    /// figures for those distributions, so it makes several requests.
+    Distribution {
+        /// Distribution name, e.g. Try-Tiny.
+        distribution: String,
+        /// Which CPAN River figure to sort on.
+        #[arg(long, value_enum, default_value = "total")]
+        by: RiverSort,
+        /// Sort ascending (smallest first) instead of descending.
+        #[arg(long)]
+        reverse: bool,
+    },
+
+    /// List the distributions whose current (latest, non-dev) release is by an
+    /// author, ordered by a CPAN River figure (transitive `total` by default),
+    /// highest first.
+    ///
+    /// Pages through the author's latest releases and then looks up the River
+    /// figures for those distributions, so it makes several requests.
+    Author {
+        /// PAUSE id, e.g. PLICEASE (case-insensitive).
+        pauseid: String,
+        /// Which CPAN River figure to sort on.
+        #[arg(long, value_enum, default_value = "total")]
+        by: RiverSort,
+        /// Sort ascending (smallest first) instead of descending.
+        #[arg(long)]
+        reverse: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Look up a CPAN author by PAUSE id.
@@ -223,6 +267,13 @@ enum Command {
     Cache {
         #[command(subcommand)]
         action: CacheAction,
+    },
+
+    /// CPAN River queries: reverse dependencies of a distribution, or the
+    /// distributions currently released by an author.
+    River {
+        #[command(subcommand)]
+        action: RiverAction,
     },
 
     /// Search a document type with a Lucene query string.
@@ -457,6 +508,39 @@ async fn main() -> Result<()> {
             }
         }
 
+        Command::River { action } => match action {
+            RiverAction::Distribution {
+                distribution,
+                by,
+                reverse,
+            } => {
+                let rows = river_distribution(&client, distribution, *by, *reverse).await?;
+                if g.json {
+                    print!("{}", json::to_string(&river_json(&rows, true), color));
+                } else {
+                    render::river(&rows, true, color);
+                    println!("{} direct reverse dependencies", rows.len());
+                }
+            }
+
+            RiverAction::Author {
+                pauseid,
+                by,
+                reverse,
+            } => {
+                let rows = river_author(&client, pauseid, *by, *reverse).await?;
+                if g.json {
+                    print!("{}", json::to_string(&river_json(&rows, false), color));
+                } else {
+                    render::river(&rows, false, color);
+                    println!(
+                        "{} distributions with a current release by {pauseid}",
+                        rows.len()
+                    );
+                }
+            }
+        },
+
         Command::Search {
             r#type,
             query,
@@ -513,6 +597,9 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
         Command::Cache { .. } => {
             anyhow::bail!("--raw does not apply to `cache` subcommands; they make no HTTP requests")
         }
+        Command::River { .. } => {
+            anyhow::bail!("--raw does not apply to `river` subcommands; they make several requests")
+        }
 
         // `download` makes two requests: the download_url lookup, then a GET of
         // the tarball it resolves to. Show both.
@@ -549,8 +636,18 @@ async fn run_raw(client: &Client, command: &Command) -> Result<()> {
 /// the `download_url` lookup; the tarball URL it resolves to is only knowable
 /// by running that request.
 fn run_curl(client: &Client, command: &Command) -> Result<()> {
-    if let Command::Cache { .. } = command {
-        anyhow::bail!("--curl does not apply to `cache` subcommands; they make no HTTP requests");
+    match command {
+        Command::Cache { .. } => {
+            anyhow::bail!(
+                "--curl does not apply to `cache` subcommands; they make no HTTP requests"
+            )
+        }
+        Command::River { .. } => {
+            anyhow::bail!(
+                "--curl does not apply to `river` subcommands; they make several requests"
+            )
+        }
+        _ => {}
     }
     let url = request_url(client, command)?;
     println!("curl {}", shell_quote(url.as_str()));
@@ -643,7 +740,9 @@ fn request_url(client: &Client, command: &Command) -> Result<Url> {
             url
         }
 
-        Command::Cache { .. } => unreachable!("--raw / --curl reject `cache` before this point"),
+        Command::Cache { .. } | Command::River { .. } => {
+            unreachable!("--raw / --curl reject these subcommands before this point")
+        }
     };
     Ok(url)
 }
@@ -769,6 +868,239 @@ async fn get_query(client: &Client, path: &str, query: &[(&str, String)]) -> Res
         anyhow::bail!("MetaCPAN API error {}: {}", status.as_u16(), body.trim());
     }
     serde_json::from_str(&body).with_context(|| format!("parsing {path} response as JSON"))
+}
+
+/// The direct reverse dependencies of `distribution` — each with the author of
+/// its most recent production release and its CPAN River figures — ordered by
+/// [`sort_river`].
+async fn river_distribution(
+    client: &Client,
+    distribution: &str,
+    by: RiverSort,
+    reverse: bool,
+) -> Result<Vec<render::RiverRow>> {
+    let mut rows = reverse_dependency_rows(client, distribution).await?;
+    fill_river(client, &mut rows).await?;
+    sort_river(&mut rows, by, reverse);
+    Ok(rows)
+}
+
+/// The distributions whose current (latest, non-dev) release is by `pauseid`,
+/// with their CPAN River figures, ordered by [`sort_river`].
+async fn river_author(
+    client: &Client,
+    pauseid: &str,
+    by: RiverSort,
+    reverse: bool,
+) -> Result<Vec<render::RiverRow>> {
+    let mut rows = author_release_rows(client, pauseid).await?;
+    fill_river(client, &mut rows).await?;
+    sort_river(&mut rows, by, reverse);
+    Ok(rows)
+}
+
+/// Order river rows by the `by` figure, descending unless `reverse`. A missing
+/// figure counts as 0; name breaks ties, and `reverse` flips the whole
+/// ordering so it is the exact inverse of the default.
+fn sort_river(rows: &mut [render::RiverRow], by: RiverSort, reverse: bool) {
+    let key = |r: &render::RiverRow| match by {
+        RiverSort::Total => r.total.unwrap_or(0),
+        RiverSort::Immediate => r.immediate.unwrap_or(0),
+    };
+    rows.sort_by(|a, b| {
+        let ord = key(b)
+            .cmp(&key(a))
+            .then_with(|| a.distribution.cmp(&b.distribution));
+        if reverse { ord.reverse() } else { ord }
+    });
+}
+
+/// `[{ "distribution", ["author",] "river": { total, immediate, bucket } }]`
+/// for `--json`. The `author` key is included only when meaningful (it varies
+/// per row for `river distribution`; for `river author` every row is the same
+/// queried author, so it is left out).
+fn river_json(rows: &[render::RiverRow], include_author: bool) -> Value {
+    let arr = rows
+        .iter()
+        .map(|r| {
+            let mut obj = serde_json::Map::new();
+            obj.insert("distribution".into(), json!(r.distribution));
+            if include_author {
+                obj.insert("author".into(), json!(r.author));
+            }
+            obj.insert(
+                "river".into(),
+                json!({ "total": r.total, "immediate": r.immediate, "bucket": r.bucket }),
+            );
+            Value::Object(obj)
+        })
+        .collect();
+    Value::Array(arr)
+}
+
+/// Page the `release` index for `pauseid`'s current (latest, non-dev) releases
+/// and return one river row per distribution (river figures filled in later).
+async fn author_release_rows(client: &Client, pauseid: &str) -> Result<Vec<render::RiverRow>> {
+    const PAGE: usize = 500;
+    let author = pauseid.to_uppercase();
+    let mut rows: Vec<render::RiverRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut from = 0usize;
+    loop {
+        let body = json!({
+            "query": { "bool": { "must": [
+                { "term": { "author": author } },
+                { "term": { "status": "latest" } },
+            ]}},
+            "size": PAGE,
+            "from": from,
+            "_source": ["distribution"],
+            "sort": ["distribution"],
+        });
+        let v: Value = client
+            .post_json("release/_search", &body)
+            .await
+            .context("searching author releases")?;
+        let empty = Vec::new();
+        let hits = v
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        if hits.is_empty() {
+            break;
+        }
+        for hit in hits {
+            let Some(dist) = hit.pointer("/_source/distribution").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen.insert(dist.to_owned()) {
+                rows.push(render::RiverRow {
+                    distribution: dist.to_owned(),
+                    author: None,
+                    total: None,
+                    immediate: None,
+                    bucket: None,
+                });
+            }
+        }
+        from += hits.len();
+        let total = v
+            .pointer("/hits/total/value")
+            .or_else(|| v.pointer("/hits/total"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        if from as u64 >= total {
+            break;
+        }
+        if from > 100_000 {
+            anyhow::bail!("release search pagination for {author} did not terminate");
+        }
+    }
+    Ok(rows)
+}
+
+/// Page through `reverse_dependencies/dist/{distribution}` and return one row
+/// per distribution whose latest release depends directly on it, carrying the
+/// distribution name and that release's author (river figures are filled in
+/// later). Makes one request per page.
+///
+/// The endpoint only serves its first ~900 results however large `page_size`
+/// is (and mis-reports `total` on the page past the end), so this pages at 100
+/// until a short or empty page, and warns on stderr when it could not get
+/// everything the first page's `total` promised.
+async fn reverse_dependency_rows(
+    client: &Client,
+    distribution: &str,
+) -> Result<Vec<render::RiverRow>> {
+    const PAGE_SIZE: usize = 100;
+    const MAX_PAGES: usize = 50;
+    let mut rows: Vec<render::RiverRow> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut reported_total = 0u64;
+    for page in 1..=MAX_PAGES {
+        let path =
+            format!("reverse_dependencies/dist/{distribution}?page={page}&page_size={PAGE_SIZE}");
+        let v = get(client, &path).await?;
+        if page == 1 {
+            reported_total = v.get("total").and_then(Value::as_u64).unwrap_or(0);
+        }
+        let empty = Vec::new();
+        let data = v.get("data").and_then(Value::as_array).unwrap_or(&empty);
+        for item in data {
+            let Some(name) = item.get("distribution").and_then(Value::as_str) else {
+                continue;
+            };
+            if seen.insert(name.to_owned()) {
+                rows.push(render::RiverRow {
+                    distribution: name.to_owned(),
+                    author: item
+                        .get("author")
+                        .and_then(Value::as_str)
+                        .map(str::to_owned),
+                    total: None,
+                    immediate: None,
+                    bucket: None,
+                });
+            }
+        }
+        if data.len() < PAGE_SIZE {
+            break;
+        }
+    }
+    if reported_total > rows.len() as u64 {
+        eprintln!(
+            "note: got {} of {reported_total} reverse dependencies for {distribution}; \
+             MetaCPAN's reverse_dependencies endpoint caps results at ~900",
+            rows.len()
+        );
+    }
+    Ok(rows)
+}
+
+/// Fill in the CPAN River figures on `rows` from the `distribution` index, in
+/// batches so the query stays well inside Elasticsearch's term and result
+/// limits. Rows whose distribution has no document keep their `None` figures.
+async fn fill_river(client: &Client, rows: &mut [render::RiverRow]) -> Result<()> {
+    use std::collections::HashMap;
+    const BATCH: usize = 1000;
+
+    let index: HashMap<String, usize> = rows
+        .iter()
+        .enumerate()
+        .map(|(i, r)| (r.distribution.clone(), i))
+        .collect();
+    let names: Vec<String> = rows.iter().map(|r| r.distribution.clone()).collect();
+
+    for chunk in names.chunks(BATCH) {
+        let body = json!({
+            "query": { "terms": { "name": chunk } },
+            "size": chunk.len(),
+            "_source": ["name", "river"],
+        });
+        let v: Value = client
+            .post_json("distribution/_search", &body)
+            .await
+            .context("searching distribution river data")?;
+        let empty = Vec::new();
+        let hits = v
+            .pointer("/hits/hits")
+            .and_then(Value::as_array)
+            .unwrap_or(&empty);
+        for hit in hits {
+            let src = hit.get("_source").unwrap_or(&Value::Null);
+            let Some(i) = src
+                .get("name")
+                .and_then(Value::as_str)
+                .and_then(|n| index.get(n).copied())
+            else {
+                continue;
+            };
+            rows[i].total = src.pointer("/river/total").and_then(Value::as_u64);
+            rows[i].immediate = src.pointer("/river/immediate").and_then(Value::as_u64);
+            rows[i].bucket = src.pointer("/river/bucket").and_then(Value::as_u64);
+        }
+    }
+    Ok(())
 }
 
 /// Some endpoints wrap their payload in a single-key envelope (`release`,

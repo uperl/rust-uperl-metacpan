@@ -307,6 +307,47 @@ pub fn mirrors(value: Value, color: bool) -> Result<()> {
     Ok(())
 }
 
+/// One row of `river` output: a distribution, optionally the author of its
+/// most recent production release, and its CPAN River figures. Every optional
+/// field is `None` when the API had no value for it.
+pub struct RiverRow {
+    pub distribution: String,
+    pub author: Option<String>,
+    pub total: Option<u64>,
+    pub immediate: Option<u64>,
+    pub bucket: Option<u64>,
+}
+
+/// Print the `river` table, in the order given. `show_author` adds the
+/// `author` column (`river distribution`); `river author` omits it since every
+/// row is the same queried author. The caller prints its own summary line.
+pub fn river(rows: &[RiverRow], show_author: bool, color: bool) {
+    let mut cols = vec!["distribution"];
+    if show_author {
+        cols.push("author");
+    }
+    cols.extend(["river total", "river immediate", "bucket"]);
+
+    let mut t = table();
+    t.set_header(header(cols, color));
+    for r in rows {
+        let mut cells = vec![Cell::new(&r.distribution)];
+        if show_author {
+            cells.push(Cell::new(r.author.as_deref().unwrap_or("-")));
+        }
+        cells.push(Cell::new(opt_num(r.total)));
+        cells.push(Cell::new(opt_num(r.immediate)));
+        cells.push(Cell::new(opt_num(r.bucket)));
+        t.add_row(cells);
+    }
+    println!("{t}");
+}
+
+/// A count for a table cell, or `-` when the API had no number for it.
+fn opt_num(n: Option<u64>) -> String {
+    n.map_or_else(|| "-".to_string(), |n| n.to_string())
+}
+
 pub fn search(value: Value, type_: &str, color: bool) -> Result<()> {
     let total = value
         .pointer("/hits/total/value")
