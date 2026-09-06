@@ -307,6 +307,49 @@ pub fn mirrors(value: Value, color: bool) -> Result<()> {
     Ok(())
 }
 
+/// One row of `river distribution` output: a reverse-dependency distribution,
+/// the author of its most recent production release, and its CPAN River
+/// figures. Every optional field is `None` when the API had no value for it.
+pub struct RiverRow {
+    pub distribution: String,
+    pub author: Option<String>,
+    pub total: Option<u64>,
+    pub immediate: Option<u64>,
+    pub bucket: Option<u64>,
+}
+
+/// Print the reverse-dependency table for `river distribution`, in the order
+/// given.
+pub fn river(rows: &[RiverRow], color: bool) {
+    let mut t = table();
+    t.set_header(header(
+        [
+            "distribution",
+            "author",
+            "river total",
+            "river immediate",
+            "bucket",
+        ],
+        color,
+    ));
+    for r in rows {
+        t.add_row(vec![
+            Cell::new(&r.distribution),
+            Cell::new(r.author.as_deref().unwrap_or("-")),
+            Cell::new(opt_num(r.total)),
+            Cell::new(opt_num(r.immediate)),
+            Cell::new(opt_num(r.bucket)),
+        ]);
+    }
+    println!("{t}");
+    println!("{} direct reverse dependencies", rows.len());
+}
+
+/// A count for a table cell, or `-` when the API had no number for it.
+fn opt_num(n: Option<u64>) -> String {
+    n.map_or_else(|| "-".to_string(), |n| n.to_string())
+}
+
 pub fn search(value: Value, type_: &str, color: bool) -> Result<()> {
     let total = value
         .pointer("/hits/total/value")
