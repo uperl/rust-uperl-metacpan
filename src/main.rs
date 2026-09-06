@@ -2,7 +2,8 @@
 //!
 //! Each MetaCPAN document type is a subcommand. Results print as a formatted
 //! table by default; `--json` switches to pretty-printed JSON, coloured when
-//! stdout is a terminal (override with `--color`).
+//! stdout is a terminal (override with `--color`); `--raw` prints the
+//! underlying HTTP request and response instead.
 
 mod diskusage;
 mod json;
@@ -13,10 +14,14 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use metacpan_api_modern::reqwest::Url;
 use metacpan_api_modern::types::DownloadUrl;
 use metacpan_api_modern::{Client, PodFormat};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+
+/// `User-Agent` sent with every request; also shown in `--raw` output.
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 /// Command line interface to the MetaCPAN API.
 #[derive(Parser)]
@@ -60,6 +65,11 @@ struct GlobalOpts {
     /// Override the API base URL.
     #[arg(long, global = true, value_name = "URL")]
     base_url: Option<String>,
+
+    /// Print the raw HTTP request and response — request line, headers, and
+    /// body — for each request the command makes, instead of a table or JSON.
+    #[arg(long, global = true)]
+    raw: bool,
 }
 
 #[derive(Copy, Clone, PartialEq, Eq, ValueEnum)]
@@ -237,6 +247,10 @@ async fn main() -> Result<()> {
         ColorWhen::Auto => std::io::stdout().is_terminal(),
     };
     let client = build_client(g)?;
+
+    if g.raw {
+        return run_raw(&client, &cli.command).await;
+    }
 
     match &cli.command {
         Command::Author { pauseid } => {
@@ -460,11 +474,7 @@ async fn main() -> Result<()> {
 }
 
 fn build_client(g: &GlobalOpts) -> Result<Client> {
-    let mut builder = Client::builder().user_agent(concat!(
-        env!("CARGO_PKG_NAME"),
-        "/",
-        env!("CARGO_PKG_VERSION")
-    ));
+    let mut builder = Client::builder().user_agent(USER_AGENT);
     if let Some(base) = &g.base_url {
         builder = builder.base_url(base.clone());
     }
@@ -484,6 +494,210 @@ fn resolve_cache_dir(g: &GlobalOpts) -> Option<PathBuf> {
     g.cache_dir
         .clone()
         .or_else(|| dirs::cache_dir().map(|base| base.join("uperl").join("metacpan")))
+}
+
+/// `--raw`: print the raw HTTP request and response for every request the
+/// command makes, and nothing else — no table, no JSON. The response cache is
+/// bypassed, so the exchange shown is one that actually happened.
+async fn run_raw(client: &Client, command: &Command) -> Result<()> {
+    match command {
+        Command::Cache { .. } => {
+            anyhow::bail!("--raw does not apply to `cache` subcommands; they make no HTTP requests")
+        }
+
+        // `download` makes two requests: the download_url lookup, then a GET of
+        // the tarball it resolves to. Show both.
+        Command::Download {
+            module,
+            version,
+            dev,
+        } => {
+            let url = download_url_endpoint(client, module, version.as_deref(), *dev)?;
+            let body = raw_get(client, url).await?;
+            if let Ok(d) = serde_json::from_slice::<DownloadUrl>(&body)
+                && let Some(tarball) = d.download_url.as_deref()
+            {
+                let tarball = Url::parse(tarball)
+                    .with_context(|| format!("parsing download URL {tarball}"))?;
+                println!();
+                raw_get(client, tarball).await?;
+            }
+            Ok(())
+        }
+
+        other => {
+            let url = raw_request_url(client, other)?;
+            raw_get(client, url).await?;
+            Ok(())
+        }
+    }
+}
+
+/// The single request URL for each command that makes exactly one GET. Mirrors
+/// the path and query each command's normal code path builds.
+fn raw_request_url(client: &Client, command: &Command) -> Result<Url> {
+    let url = match command {
+        Command::Author { pauseid } => client.url(&format!("author/{pauseid}"))?,
+
+        Command::Release { name, author } => match author {
+            Some(author) => client.url(&format!("release/{author}/{name}"))?,
+            None => client.url(&format!("release/{name}"))?,
+        },
+
+        Command::Module { module } => client.url(&format!("module/{module}"))?,
+
+        Command::File {
+            author,
+            release,
+            path,
+        } => client.url(&format!(
+            "file/{author}/{release}/{}",
+            path.trim_start_matches('/')
+        ))?,
+
+        Command::Source {
+            author,
+            release,
+            path,
+        } => client.url(&format!(
+            "source/{author}/{release}/{}",
+            path.trim_start_matches('/')
+        ))?,
+
+        Command::Pod { module, format } => {
+            let mut url = client.url(&format!("pod/{module}"))?;
+            url.query_pairs_mut()
+                .append_pair("content-type", PodFormat::from(*format).mime());
+            url
+        }
+
+        Command::Distribution { distribution } => {
+            client.url(&format!("distribution/{distribution}"))?
+        }
+
+        Command::Changes { name, author } => match author {
+            Some(author) => client.url(&format!("changes/{author}/{name}"))?,
+            None => client.url(&format!("changes/{name}"))?,
+        },
+
+        Command::DownloadUrl {
+            module,
+            version,
+            dev,
+        } => download_url_endpoint(client, module, version.as_deref(), *dev)?,
+
+        Command::Mirrors => client.url("mirror")?,
+
+        Command::Search {
+            r#type,
+            query,
+            size,
+            from,
+        } => {
+            let mut url = client.url(&format!("{type}/_search"))?;
+            {
+                let mut pairs = url.query_pairs_mut();
+                pairs.append_pair("q", query);
+                if let Some(size) = size {
+                    pairs.append_pair("size", &size.to_string());
+                }
+                if let Some(from) = from {
+                    pairs.append_pair("from", &from.to_string());
+                }
+            }
+            url
+        }
+
+        Command::Cache { .. } | Command::Download { .. } => {
+            unreachable!("handled directly in run_raw")
+        }
+    };
+    Ok(url)
+}
+
+/// Build the `download_url/{module}` URL with its optional query parameters,
+/// matching what `download-url` and `download` send.
+fn download_url_endpoint(
+    client: &Client,
+    module: &str,
+    version: Option<&str>,
+    dev: bool,
+) -> Result<Url> {
+    let mut url = client.url(&format!("download_url/{module}"))?;
+    if version.is_some() || dev {
+        let mut pairs = url.query_pairs_mut();
+        if let Some(version) = version {
+            pairs.append_pair("version", version);
+        }
+        if dev {
+            pairs.append_pair("dev", "1");
+        }
+    }
+    Ok(url)
+}
+
+/// GET `url`, printing the raw request and response to stdout: the request line
+/// and headers, a blank line, the response status line and headers, a blank
+/// line, then the body verbatim. Returns the response body bytes. A non-2xx
+/// status is printed like any other response, not turned into an error — the
+/// point of `--raw` is to see exactly what came back.
+async fn raw_get(client: &Client, url: Url) -> Result<Vec<u8>> {
+    let host = match url.port() {
+        Some(port) => format!("{}:{port}", url.host_str().unwrap_or_default()),
+        None => url.host_str().unwrap_or_default().to_string(),
+    };
+    let target = match url.query() {
+        Some(query) => format!("{}?{}", url.path(), query),
+        None => url.path().to_string(),
+    };
+
+    // Set the headers reqwest would otherwise add at send time ourselves, so
+    // what we print is what actually goes on the wire.
+    let request = client
+        .http()
+        .get(url.clone())
+        .header("host", &host)
+        .header("user-agent", USER_AGENT)
+        .header("accept", "*/*")
+        .build()
+        .context("building request")?;
+
+    let mut dump = format!("GET {target} HTTP/1.1\n");
+    append_headers(&mut dump, request.headers());
+    dump.push('\n');
+
+    let response = client
+        .http()
+        .execute(request)
+        .await
+        .with_context(|| format!("GET {url}"))?;
+
+    dump.push_str(&format!("{:?} {}\n", response.version(), response.status()));
+    append_headers(&mut dump, response.headers());
+    dump.push('\n');
+
+    let body = response.bytes().await.context("reading response body")?;
+
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    out.write_all(dump.as_bytes())?;
+    out.write_all(&body)?;
+    if !body.ends_with(b"\n") {
+        out.write_all(b"\n")?;
+    }
+    out.flush()?;
+
+    Ok(body.to_vec())
+}
+
+/// Append `name: value` lines for every header to `dump`.
+fn append_headers(dump: &mut String, headers: &metacpan_api_modern::reqwest::header::HeaderMap) {
+    for (name, value) in headers {
+        dump.push_str(name.as_str());
+        dump.push_str(": ");
+        dump.push_str(value.to_str().unwrap_or("<non-utf8>"));
+        dump.push('\n');
+    }
 }
 
 /// GET a path and parse the body as JSON.
