@@ -66,8 +66,9 @@ uperl-metacpan <SUBCOMMAND> [ARGS] [--json] [--raw] [--curl] [--color <auto|alwa
 
 ### Caching
 
-Successful GET responses are cached on disk for one hour. The default location
-is the platform cache directory:
+Successful responses are cached on disk for one hour — every GET, and the
+`_search` POSTs that back `river` and `adoptable` too (keyed by URL and request
+body). The default location is the platform cache directory:
 
 | Platform | Default cache directory |
 | --- | --- |
@@ -86,9 +87,9 @@ downstream count), largest first. Pass `--by immediate` to sort on the direct
 dependent count instead, and `--reverse` to sort smallest first. Each row also
 shows the `author` (PAUSE id) of that distribution's most recent production
 release. It pages through the reverse-dependency list and then looks up the
-River figures for those distributions, so it makes several requests; responses
-are cached like any other GET. A distribution with no River data on MetaCPAN is
-still listed, with `-` for its figures.
+River figures for those distributions, so it makes several requests; every
+response is cached, so a re-run within the hour is fast. A distribution with no
+River data on MetaCPAN is still listed, with `-` for its figures.
 
 MetaCPAN's `reverse_dependencies` endpoint only serves its first ~900 results;
 for a distribution with more reverse dependencies than that, the command prints
@@ -117,7 +118,8 @@ or co-maintain — with its CPAN River `total` and `immediate`, largest `total`
 first. It takes the same `--by total|immediate` and `--reverse` options as the
 `river` subcommands. It reads both authors' permissions, resolves each
 namespace to the distribution that currently provides it, and looks up River
-figures, so it makes many requests (all cached).
+figures, so it makes many requests — every response is cached, so the first
+run takes a few seconds and re-runs are near-instant.
 
 ### Examples
 
